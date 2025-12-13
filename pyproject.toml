@@ -1,0 +1,33 @@
+[project]
+name = "vanlin"
+version = "0.1.0"
+description = "Truma InetX LIN bus sniffer and Home Assistant integration"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyserial>=3.5",
+    "paho-mqtt>=2.0",
+    "structlog>=24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+vanlin = "src.main:main"
+vanlin-sniff = "tools.raw_logger:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "tools*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
