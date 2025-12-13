@@ -2,24 +2,28 @@
 
 ## Overview
 
-Python-based LIN bus sniffer/controller running on a Raspberry Pi that publishes Truma Combi heater status to Home Assistant via MQTT, with eventual control capabilities.
+Two-phase approach:
+1. **Protocol Analysis** - Python-based LIN sniffer to decode InetX traffic
+2. **Production Integration** - ESPHome on ESP32 with native HA integration + local web UI
 
 ## System Details
 
 - **Truma Model:** Combi heater (diesel/electric with hot water)
 - **Heating modes:** Diesel, Electric (900W/1800W), Hybrid
 - **Protocol:** LIN bus (Local Interconnect Network)
-- **Hardware:** USB-LIN adapter + Raspberry Pi
-- **Integration:** MQTT with Home Assistant auto-discovery
+- **Analysis Hardware:** USB-LIN adapter + Raspberry Pi (temporary)
+- **Production Hardware:** ESP32 + LIN transceiver
+- **Integration:** ESPHome (native HA + local web server)
 
 ## Architecture
 
+### Phase 1: Protocol Analysis (Temporary)
 ```
-┌─────────────┐    LIN     ┌──────────────┐    LIN     ┌─────────────┐
-│ Truma Combi │◄──────────►│ Control Panel│◄──────────►│ Other nodes │
-└─────────────┘            └──────────────┘            └─────────────┘
+┌─────────────┐    LIN     ┌──────────────┐
+│ Truma Combi │◄──────────►│ Control Panel│
+└─────────────┘            └──────────────┘
                                   │
-                                  │ T-splice
+                                  │ T-splice (passive sniff)
                                   ▼
                            ┌──────────────┐
                            │ USB-LIN      │
@@ -27,10 +31,26 @@ Python-based LIN bus sniffer/controller running on a Raspberry Pi that publishes
                            └──────────────┘
                                   │ USB
                                   ▼
-                           ┌──────────────┐     MQTT    ┌──────────────┐
-                           │ Raspberry Pi │────────────►│Home Assistant│
-                           │ (Python)     │             │              │
-                           └──────────────┘             └──────────────┘
+                           ┌──────────────┐
+                           │ Raspberry Pi │ → Log files for analysis
+                           │ (Python)     │
+                           └──────────────┘
+```
+
+### Phase 2: Production (ESPHome)
+```
+┌─────────────┐    LIN     ┌──────────────┐    LIN     ┌─────────────┐
+│ Truma Combi │◄──────────►│ Control Panel│◄──────────►│    ESP32    │
+└─────────────┘            └──────────────┘            │  (ESPHome)  │
+                                                       └──────┬──────┘
+                                                              │ WiFi
+                                    ┌─────────────────────────┼─────────────────────────┐
+                                    │                         │                         │
+                                    ▼                         ▼                         ▼
+                             ┌──────────────┐          ┌──────────────┐          ┌──────────────┐
+                             │Home Assistant│          │  Local Web   │          │    Phone     │
+                             │   (native)   │          │   Server     │          │   Browser    │
+                             └──────────────┘          └──────────────┘          └──────────────┘
 ```
 
 ## LIN Frame Structure
@@ -42,8 +62,9 @@ Python-based LIN bus sniffer/controller running on a Raspberry Pi that publishes
 └───────┴────────┴──────────────────┴──────────┘
 ```
 
-- **Baud rate:** Likely 19200 (to verify)
-- **Checksum:** Classic or Enhanced (to verify)
+- **Baud rate:** 9600 (confirmed from existing projects)
+- **Stop bits:** 2
+- **Checksum:** Enhanced (LIN 2.x style)
 
 ## Project Structure
 
@@ -106,22 +127,27 @@ truma/combi/command                          # Control commands (Phase 4)
 
 ## Development Phases
 
-### Phase 1: Sniff & Log
-- Capture raw LIN traffic
+### Phase 1: Sniff & Log (Python)
+- Capture raw LIN traffic with USB-LIN adapter
 - Identify frame IDs and patterns
-- Verify hardware/baud rate/checksum
+- Verify InetX uses same protocol as CP Plus
 
-### Phase 2: Decode
+### Phase 2: Decode (Python)
 - Map frames to meaning (temps, status, commands)
-- Document protocol findings
+- Compare with existing inetbox.py/ESPHome component
+- Document any InetX-specific differences
 
-### Phase 3: Monitor
-- Publish decoded status to HA via MQTT
-- Set up auto-discovery
+### Phase 3: ESPHome Integration
+- Test existing esphome-truma_inetbox component
+- If works: configure for InetX
+- If not: fork and adapt based on Phase 2 findings
 
-### Phase 4: Control
-- Send commands to Truma (once protocol is understood)
-- Implement full climate entity control
+### Phase 4: Production Deployment
+- ESP32 + LIN transceiver hardware build
+- ESPHome config with:
+  - Native Home Assistant API
+  - Local web server for standalone control
+  - WiFi fallback AP for initial setup
 
 ## Log Format
 
@@ -133,7 +159,95 @@ Designed for human readability and machine parsing during reverse-engineering.
 
 ## Prior Art
 
-Existing reverse-engineering work exists for Truma CP Plus - protocol structure may be similar. InetX-specific protocol is undocumented and will require sniffing.
+Existing reverse-engineering work exists for Truma CP Plus:
+- [inetbox.py](https://github.com/danielfett/inetbox.py) - Python reference implementation
+- [esphome-truma_inetbox](https://github.com/Fabian-Schmidt/esphome-truma_inetbox) - ESPHome component (target)
+- [TruMinus](https://github.com/olivluca/TruMinus) - ESP32 CP Plus emulator
+- [inetbox2mqtt](https://github.com/mc0110/inetbox2mqtt) - MQTT bridge
+
+InetX is "iNet ready" so protocol should be compatible.
+
+## ESPHome Configuration (Phase 3-4)
+
+Target configuration for production:
+
+```yaml
+esphome:
+  name: truma-inetx
+  friendly_name: Truma Heater
+
+esp32:
+  board: esp32dev
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Truma-Fallback"
+    password: !secret fallback_password
+
+web_server:
+  port: 80
+  local: true
+
+api:
+  encryption:
+    key: !secret api_key
+
+logger:
+  level: DEBUG
+
+uart:
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 9600
+  stop_bits: 2
+
+external_components:
+  - source: github://Fabian-Schmidt/esphome-truma_inetbox
+
+truma_inetbox:
+  id: truma
+
+climate:
+  - platform: truma_inetbox
+    name: "Room"
+    type: ROOM
+  - platform: truma_inetbox
+    name: "Water"
+    type: WATER
+
+sensor:
+  - platform: truma_inetbox
+    name: "Current Room Temp"
+    type: CURRENT_ROOM_TEMPERATURE
+  - platform: truma_inetbox
+    name: "Current Water Temp"
+    type: CURRENT_WATER_TEMPERATURE
+
+binary_sensor:
+  - platform: truma_inetbox
+    name: "Heater Active"
+    type: HEATER_ROOM
+  - platform: truma_inetbox
+    name: "Water Heating"
+    type: HEATER_WATER
+
+select:
+  - platform: truma_inetbox
+    name: "Energy Mix"
+    type: ENERGY_MIX
+  - platform: truma_inetbox
+    name: "Electric Power"
+    type: ELECTRIC_POWER_LEVEL
+```
+
+## Hardware for ESPHome
+
+- ESP32 dev board (ESP32-WROOM-32 recommended)
+- LIN transceiver module (TJA1020 or MCP2003)
+- 12V power supply (from vehicle)
+- 3.3V regulator for ESP32 (if not on dev board)
 
 ## Success Criteria (Phase 1)
 
