@@ -164,10 +164,10 @@ class TrumaDecoder:
         Byte 0: Counter/sequence (changes frequently)
         Byte 1: Unknown
         Byte 2: Current room temperature (0.1°C units, single byte)
-        Byte 3: Unknown (maybe water temp related, often ~40)
+        Byte 3: Current water temperature (°C, direct value)
         Byte 4: Unknown
-        Byte 5: Water heater active (1=active, 49=off)
-        Byte 6-7: Unknown
+        Byte 5: Water heater active (49=off, other values=active)
+        Byte 6-7: Unknown (usually 0xF0 0x0F)
         """
         if len(data) < 6:
             return None
@@ -179,6 +179,11 @@ class TrumaDecoder:
         if 50 < temp_raw < 400:  # Sanity check (5-40°C range)
             self.status.current_room_temp = temp_raw / 10.0
             msgs.append(f"Room: {self.status.current_room_temp:.1f}°C")
+
+        # Byte 3: current water temperature in °C
+        water_temp = data[3]
+        if 0 < water_temp < 100:  # Sanity check
+            self.status.current_water_temp = float(water_temp)
 
         # Byte 5: water heater active
         water_active = data[5] != 49  # 49 = off, other values = active

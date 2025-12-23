@@ -46,7 +46,7 @@ Byte 15:   Frame checksum (two's complement)
 | 0 | Counter | Changes frequently |
 | 1 | Unknown | |
 | 2 | Current room temp | ÷10 for °C (e.g., 193 = 19.3°C) |
-| 3 | Unknown | Often ~40 |
+| 3 | Current water temp | Direct °C value (e.g., 40 = 40°C) ✓ CONFIRMED |
 | 4 | Unknown | |
 | 5 | Water heater active | 49=OFF, other values=ON |
 | 6-7 | Unknown | Usually 0xF0 0x0F |
@@ -94,7 +94,7 @@ Byte 15:   Frame checksum (two's complement)
    - Commands use a different protocol path
    - There's a sync delay we haven't captured
 
-2. **Current water temperature**: Location not yet identified. Might be in 0x21 byte 3 or transported via 0x3C/0x3D.
+2. **Current water temperature**: ✓ SOLVED - 0x21 byte 3, direct °C value.
 
 ## Where to Continue
 
@@ -105,14 +105,13 @@ The target room temperature change from the iNet app isn't visible. Next steps:
 - Check if iNet box needs to be "woken up" or synced
 - Consider if the adapter needs repositioning in the LIN bus
 
-### Priority 2: Water Temperature
-- Current water temp not yet found
-- May need to correlate with actual water heating cycle
-- 0x21 byte 3 often shows ~40, could be related
+### Priority 2: Water Temperature ✓ SOLVED
+- Current water temp: 0x21 byte 3, direct °C value
+- Confirmed by matching app display (39-40°C) with captured byte value
 
 ### Priority 3: Additional Status Fields
 - 0x20 byte 2 changes with modes - meaning unclear
-- 0x21 bytes 3-4 - possibly water or other temps
+- 0x21 byte 4 - unknown, often ~18
 - Error codes - not yet tested
 
 ## Files Created
