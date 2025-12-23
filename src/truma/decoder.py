@@ -79,6 +79,17 @@ class TrumaStatus:
     operating: bool = False
     error_code: int = 0
 
+    # From 0x22 - Heater Info 2
+    voltage: Optional[float] = None              # Supply voltage in V
+    ac_power_connected: bool = False             # 230V AC connected
+    heater_enabled: bool = False                 # Heater enabled flag
+    heating_commanded: bool = False              # Heating commanded
+    room_heating_required: bool = False          # Room heating required
+    heating_in_progress: bool = False            # Actively heating
+    hot_level_selected: bool = False             # Hot vs Eco water mode
+    error_present: bool = False                  # Error code present
+    ready: bool = False                          # OK/Ready status
+
     def water_mode_str(self) -> str:
         """Get water mode as string."""
         if self.target_water_temp is None:
@@ -277,21 +288,73 @@ class TrumaDecoder:
     def _decode_status_3(self, data: bytes) -> Optional[str]:
         """Decode status frame 3 (0x22) - Heater Info 2.
 
-        Protocol 4.0 / D4E format:
-        Byte 0: Counter/status
-        Byte 1: Unknown (often 240 or 112)
-        Byte 2: Status byte (not used for mode - 0x20 is authoritative)
-        Byte 3: Status flags
-        Byte 4-7: 0xFF padding
-
-        Note: Water mode is decoded from frame 0x20 byte 2, not here.
+        Protocol 4.0 / D4E format (from wiki.womonet.io):
+        Byte 0: Voltage (÷10 for volts)
+        Byte 1: System flags (bits 4-7)
+          - Bit 4: Heating commanded
+          - Bit 5: AC power connected
+          - Bit 6: Heater enabled
+          - Bit 7: Room heating required
+        Byte 2: Boiler state
+          - Bit 0: Heating in progress
+          - Bit 4: Burner in boiler (always set on Combi)
+          - Bit 5: Hot level selected (vs Eco)
+        Byte 3: Status
+          - Bit 0: Error code present
+          - Bit 2: OK/Ready status
+        Byte 4-7: Reserved (0xFF)
         """
         if len(data) < 4:
             return None
 
-        # Frame 0x22 contains status info, but water_mode comes from 0x20
-        # This frame may contain additional status we haven't decoded yet
-        return None
+        msgs = []
+
+        # Byte 0: Voltage
+        voltage = data[0] / 10.0
+        if 8.0 < voltage < 20.0:  # Sanity check for 12V/24V systems
+            if self.status.voltage is None or abs(voltage - self.status.voltage) > 0.5:
+                self.status.voltage = voltage
+                msgs.append(f"Voltage: {voltage:.1f}V")
+
+        # Byte 1: System flags (bits 4-7)
+        sys_flags = data[1]
+        heating_commanded = bool(sys_flags & 0x10)
+        ac_power = bool(sys_flags & 0x20)
+        heater_enabled = bool(sys_flags & 0x40)
+        room_heating_req = bool(sys_flags & 0x80)
+
+        if ac_power != self.status.ac_power_connected:
+            self.status.ac_power_connected = ac_power
+            msgs.append(f"AC: {'ON' if ac_power else 'OFF'}")
+
+        self.status.heating_commanded = heating_commanded
+        self.status.heater_enabled = heater_enabled
+        self.status.room_heating_required = room_heating_req
+
+        # Byte 2: Boiler state
+        boiler_state = data[2]
+        heating_in_progress = bool(boiler_state & 0x01)
+        hot_level = bool(boiler_state & 0x20)
+
+        if heating_in_progress != self.status.heating_in_progress:
+            self.status.heating_in_progress = heating_in_progress
+            msgs.append(f"Heating: {'ON' if heating_in_progress else 'OFF'}")
+
+        self.status.hot_level_selected = hot_level
+
+        # Byte 3: Status
+        status_byte = data[3]
+        error_present = bool(status_byte & 0x01)
+        ready = bool(status_byte & 0x04)
+
+        if error_present != self.status.error_present:
+            self.status.error_present = error_present
+            if error_present:
+                msgs.append("ERROR PRESENT")
+
+        self.status.ready = ready
+
+        return " | ".join(msgs) if msgs else None
 
     def _decode_transport_response(self, data: bytes) -> Optional[str]:
         """Decode transport layer response (0x3D).
