@@ -87,27 +87,54 @@ Byte 15:   Frame checksum (two's complement)
 - **Heater ON**: Continuous traffic (~3 frames/sec)
 - **Heater OFF**: Bursts every ~15 seconds
 
-## Known Issues
+## Decoded Fields - D4E / InetX (Protocol 4.0)
 
-1. **Target setpoint not updating**: Changes made via iNet app don't appear on the bus we're monitoring. This suggests either:
-   - The adapter is positioned between iNet box and heater, missing iNet ← app traffic
-   - Commands use a different protocol path
-   - There's a sync delay we haven't captured
+### Frame 0x20 - Heater Command (Master → Heater)
+| Byte | Field | Encoding |
+|------|-------|----------|
+| 0 | **Room setpoint** | `temp = ((code - 170) mod 256) / 10` (0xAA=OFF) |
+| 1 | Control flags | Bit0=heating enable, Bit7=water mode inv |
+| 2 | Water setpoint | 0xAA=OFF, 0xC3=ECO(40°C), 0xD0=HOT(60°C) |
+| 3 | Fuel control | 0xFA=enabled, 0x00=disabled |
+| 4 | Electric power | ×100 for watts (0x00=off, 0x09=900W, 0x12=1800W) |
+| 5 | Ventilation | Bits4-7: level (0xB=Eco, 0xD=High) |
+| 6 | Constant | 0xE0 |
+| 7 | Unknown | 0x0F |
 
-2. **Current water temperature**: ✓ SOLVED - 0x21 byte 3, direct °C value.
+**Room setpoint examples:**
+- 0x40 = 15°C
+- 0x4A = 16°C
+- 0x72 = 20°C
+- 0xA4 = 25°C (wraps at 256)
+
+### Frame 0x21 - Heater Info 1 (Heater → Master)
+| Byte | Field | Encoding |
+|------|-------|----------|
+| 0-2 | Temps (packed) | Two 12-bit values in Kelvin×10 |
+| 3 | Burner power | ×100W |
+| 4 | Electric power | ×100W |
+| 5 | Status/fan | Bits0-1=energy, Bits4-6=fan speed |
+| 6-7 | Unknown | Usually 0xF0 0x0F |
+
+**Temperature decoding:**
+- Room: `((byte1 & 0x0F) << 8 | byte0) / 10 - 273`
+- Water: `((byte2 << 4) | (byte1 >> 4)) / 10 - 273`
 
 ## Where to Continue
 
-### Priority 1: Room Target Setpoint
-The target room temperature change from the iNet app isn't visible. Next steps:
-- Monitor ALL frames (including 0x0A, 0x1F) during setpoint change
-- Try longer capture windows (minutes instead of seconds)
-- Check if iNet box needs to be "woken up" or synced
-- Consider if the adapter needs repositioning in the LIN bus
+### Priority 1: Room Setpoint ✓ SOLVED
+- Frame 0x20 byte 0 contains room setpoint
+- D4E formula: `temp = ((code - 170) mod 256) / 10`
+- Confirmed by watching live changes: 0x40=15°C, 0x72=20°C, etc.
 
-### Priority 2: Water Temperature ✓ SOLVED
-- Current water temp: 0x21 byte 3, direct °C value
-- Confirmed by matching app display (39-40°C) with captured byte value
+### Priority 2: Current Temperatures ✓ SOLVED
+- Frame 0x21 bytes 0-2 contain 12-bit Kelvin×10 packed values
+- Room: `((byte1 & 0x0F) << 8 | byte0) / 10 - 273`
+- Water: `((byte2 << 4) | (byte1 >> 4)) / 10 - 273`
+
+### Priority 3: Update decoder.py
+- Update to use correct D4E/Protocol 4.0 formulas
+- Remove old byte-offset based decoding
 
 ### Priority 3: Additional Status Fields
 - 0x20 byte 2 changes with modes - meaning unclear
