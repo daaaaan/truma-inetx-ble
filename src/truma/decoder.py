@@ -54,15 +54,26 @@ class TrumaStatus:
     current_room_temp: Optional[float] = None      # °C
     target_room_temp: Optional[int] = None         # °C (0=off, 5-30)
     current_water_temp: Optional[float] = None     # °C
-    target_water_temp: Optional[int] = None        # Raw value (0/40/60/200)
+    target_water_temp: Optional[int] = None        # Raw value (0/40/50/60)
 
     # Operating modes
     heating_mode: Optional[HeatingMode] = None
     energy_mix: Optional[EnergyMix] = None
-    electric_power: int = 0                        # Watts (0, 900, 1800)
+    electric_power: int = 0                        # Watts (setpoint from 0x20)
     diesel_active: bool = False
     water_mode: Optional[WaterMode] = None
     water_heater_active: bool = False
+
+    # Device capabilities (from 0x21)
+    burner_power_max: int = 0                      # Watts (e.g., 4000 or 6000)
+    electric_power_max: int = 0                    # Watts (e.g., 1800)
+
+    # Active energy sources (from 0x21 status byte)
+    fuel_active: bool = False                      # Gas/diesel burner running
+    electric_active: bool = False                  # Electric heater running
+
+    # Fan speed (from 0x21 status byte bits 4-6)
+    fan_speed: int = 0                             # 0-7 scale (0=off, 7=max)
 
     # Status
     operating: bool = False
@@ -198,9 +209,14 @@ class TrumaDecoder:
 
         Protocol 4.0 / D4E format (from wiki.womonet.io):
         Bytes 0-2: Two 12-bit temperatures packed in Kelvin×10
-        Byte 3: Burner power (×100W)
-        Byte 4: Electric power (×100W)
-        Byte 5: Status/energy/fan (bits 0-1: energy, bits 4-6: fan)
+        Byte 3: Burner power capability (×100W)
+        Byte 4: Electric power capability (×100W)
+        Byte 5: Status byte:
+          - Bit 0: Fuel active (gas/diesel)
+          - Bit 1: Electric active
+          - Bits 2-3: Unknown (always 0)
+          - Bits 4-6: Fan speed (0-7 scale)
+          - Bit 7: Unknown
         Byte 6-7: Unknown (usually 0xF0 0x0F)
         """
         if len(data) < 6:
@@ -216,7 +232,6 @@ class TrumaDecoder:
         room_celsius = room_raw / 10.0 - 273.0
         if 0 < room_celsius < 50:  # Sanity check
             self.status.current_room_temp = room_celsius
-            msgs.append(f"Room: {room_celsius:.1f}°C")
 
         # Water temp: (byte2 << 4) | (byte1 >> 4)
         water_raw = (byte2 << 4) | (byte1 >> 4)
@@ -224,15 +239,38 @@ class TrumaDecoder:
         if 0 < water_celsius < 100:  # Sanity check
             self.status.current_water_temp = water_celsius
 
-        # Byte 5: status/energy/fan
+        # Byte 3: Burner power capability (×100W)
+        self.status.burner_power_max = data[3] * 100
+
+        # Byte 4: Electric power capability (×100W)
+        self.status.electric_power_max = data[4] * 100
+
+        # Byte 5: Status byte
         status_byte = data[5]
-        # Bits 0-1: energy source active
-        # Bits 4-6: fan speed
-        water_active = (status_byte & 0x03) != 0
-        if water_active != self.status.water_heater_active:
-            self.status.water_heater_active = water_active
-            state = "ON" if water_active else "OFF"
-            msgs.append(f"Water heater: {state}")
+
+        # Bit 0: Fuel active
+        fuel_active = bool(status_byte & 0x01)
+        if fuel_active != self.status.fuel_active:
+            self.status.fuel_active = fuel_active
+            msgs.append(f"Fuel: {'ON' if fuel_active else 'OFF'}")
+
+        # Bit 1: Electric active
+        electric_active = bool(status_byte & 0x02)
+        if electric_active != self.status.electric_active:
+            self.status.electric_active = electric_active
+            msgs.append(f"Electric: {'ON' if electric_active else 'OFF'}")
+
+        # Bits 4-6: Fan speed (0-7)
+        fan_speed = (status_byte >> 4) & 0x07
+        if fan_speed != self.status.fan_speed:
+            self.status.fan_speed = fan_speed
+            msgs.append(f"Fan: {fan_speed}")
+
+        # Update water_heater_active based on any energy source
+        self.status.water_heater_active = fuel_active or electric_active
+
+        # Update operating status
+        self.status.operating = fan_speed > 0 or fuel_active or electric_active
 
         return " | ".join(msgs) if msgs else None
 
