@@ -90,16 +90,25 @@ class LINTestAdapter(LinAdapter):
 
     HEADER_MODE = 0x11
     HEADER_MONITOR = 0x44
+    HEADER_HOST_TX = 0x22  # Host mode transmit
 
     MODE_STANDBY = 0
     MODE_HOST = 1
     MODE_SLAVE = 2
     MODE_MONITOR = 3
 
-    def __init__(self, port: str, lin_baud: int = 9600):
+    def __init__(self, port: str, lin_baud: int = 9600, mode: str = "monitor"):
+        """Initialize adapter.
+
+        Args:
+            port: Serial port path
+            lin_baud: LIN bus baud rate (default 9600)
+            mode: Operating mode - "monitor" (passive) or "host" (can send)
+        """
         self.port = port
         self.lin_baud = lin_baud
         self.usb_baud = 460800
+        self._mode = mode
         self._serial: Optional[serial.Serial] = None
         self._buffer = bytearray()
 
@@ -114,7 +123,7 @@ class LINTestAdapter(LinAdapter):
         return bytes(cmd)
 
     def open(self) -> None:
-        """Open adapter and set monitor mode."""
+        """Open adapter and set operating mode."""
         self._serial = serial.Serial(
             self.port,
             self.usb_baud,
@@ -124,15 +133,21 @@ class LINTestAdapter(LinAdapter):
         self._serial.reset_output_buffer()
         time.sleep(0.1)
 
-        # Must send standby first, then monitor
+        # Must send standby first
         standby_cmd = self._build_mode_cmd(self.MODE_STANDBY, self.lin_baud)
         self._serial.write(standby_cmd)
         self._serial.flush()
         time.sleep(0.1)
         self._serial.read(1000)  # Drain any response
 
-        monitor_cmd = self._build_mode_cmd(self.MODE_MONITOR, self.lin_baud)
-        self._serial.write(monitor_cmd)
+        # Set requested mode
+        if self._mode == "host":
+            mode_val = self.MODE_HOST
+        else:
+            mode_val = self.MODE_MONITOR
+
+        mode_cmd = self._build_mode_cmd(mode_val, self.lin_baud)
+        self._serial.write(mode_cmd)
         self._serial.flush()
         time.sleep(0.1)
         self._serial.read(1000)  # Drain initial burst
@@ -182,9 +197,58 @@ class LINTestAdapter(LinAdapter):
                 if lin_frame:
                     yield lin_frame
 
+    def _build_tx_frame(self, frame: LinFrame) -> bytes:
+        """Build 16-byte transmit command for host mode.
+
+        Format:
+        - Byte 0: Header (0x22 for host TX)
+        - Byte 1: Channel (0)
+        - Byte 2: Frame ID
+        - Byte 3: Direction (0=master sends data)
+        - Byte 4: Checksum type (2=enhanced)
+        - Byte 5: Data length
+        - Bytes 6-13: Data (padded to 8 bytes)
+        - Byte 14: LIN checksum
+        - Byte 15: Frame checksum
+        """
+        cmd = bytearray(16)
+        cmd[0] = self.HEADER_HOST_TX
+        cmd[1] = 0  # Channel
+        cmd[2] = frame.frame_id
+        cmd[3] = 0  # Direction: master sends
+        cmd[4] = 2  # Enhanced checksum
+        cmd[5] = len(frame.data)
+
+        # Copy data
+        for i, b in enumerate(frame.data):
+            cmd[6 + i] = b
+
+        cmd[14] = frame.checksum
+        cmd[15] = calc_frame_checksum(cmd[:15])
+
+        return bytes(cmd)
+
     def send_frame(self, frame: LinFrame) -> bool:
-        """Send a LIN frame (not implemented for monitor mode)."""
-        raise NotImplementedError("LINTest-MI in monitor mode cannot send frames")
+        """Send a LIN frame.
+
+        Only works in host mode. In monitor mode, raises NotImplementedError.
+
+        Args:
+            frame: LIN frame to send
+
+        Returns:
+            True if sent successfully
+        """
+        if self._mode != "host":
+            raise NotImplementedError("LINTest-MI must be in host mode to send frames")
+
+        if not self._serial:
+            raise RuntimeError("Adapter not open")
+
+        tx_cmd = self._build_tx_frame(frame)
+        self._serial.write(tx_cmd)
+        self._serial.flush()
+        return True
 
     def __enter__(self):
         self.open()
