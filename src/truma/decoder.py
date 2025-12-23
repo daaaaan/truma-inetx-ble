@@ -51,6 +51,8 @@ class TrumaStatus:
     # Operating modes
     heating_mode: Optional[HeatingMode] = None
     energy_mix: Optional[EnergyMix] = None
+    electric_power: int = 0                        # Watts (0, 900, 1800)
+    diesel_active: bool = False
 
     # Status
     operating: bool = False
@@ -101,23 +103,50 @@ class TrumaDecoder:
         """Decode status frame 1 (0x20).
 
         Byte 0-1: Header/counter (changes frequently)
-        Byte 2-3: Unknown
-        Byte 4: Unknown
-        Byte 5: Operating status (210=running, 2=off)
+        Byte 2: Unknown
+        Byte 3: Diesel flag (250=on, 0=off)
+        Byte 4: Electric power level (0=off, 9=900W, 18=1800W)
+        Byte 5: Operating status (~210=running, ~2=off)
         Byte 6: Mode flags (240=on, 224=off)
-        Byte 7: Unknown
+        Byte 7: Unknown (0x0F)
         """
         if len(data) < 7:
             return None
 
+        # Energy source decoding
+        diesel_on = data[3] == 250
+        electric_power = data[4] * 100  # 0, 900, or 1800
+
+        self.status.diesel_active = diesel_on
+        self.status.electric_power = electric_power
+
+        # Determine energy mix
+        if diesel_on and electric_power > 0:
+            self.status.energy_mix = EnergyMix.MIX
+        elif diesel_on:
+            self.status.energy_mix = EnergyMix.GAS
+        elif electric_power > 0:
+            self.status.energy_mix = EnergyMix.ELECTRIC
+        else:
+            self.status.energy_mix = EnergyMix.NONE
+
+        # Operating status
         op_byte = data[5]
         was_operating = self.status.operating
-        self.status.operating = op_byte > 100  # 210 when on, 2 when off
+        self.status.operating = op_byte > 100  # ~210 when on, ~2 when off
 
+        # Build status message
+        msgs = []
         if self.status.operating != was_operating:
             state = "ON" if self.status.operating else "OFF"
-            return f"Heater {state}"
-        return None
+            msgs.append(f"Heater {state}")
+
+        if electric_power > 0:
+            msgs.append(f"Electric: {electric_power}W")
+        if diesel_on:
+            msgs.append("Diesel: ON")
+
+        return " | ".join(msgs) if msgs else None
 
     def _decode_status_2(self, data: bytes) -> Optional[str]:
         """Decode status frame 2 (0x21).
