@@ -110,24 +110,52 @@ class TrumaDecoder:
         return None
 
     def _decode_status_1(self, data: bytes) -> Optional[str]:
-        """Decode status frame 1 (0x20).
+        """Decode frame 0x20 - Heater Command.
 
-        Byte 0-1: Header/counter (changes frequently)
-        Byte 2: Unknown
-        Byte 3: Diesel flag (250=on, 0=off)
-        Byte 4: Electric power level (0=off, 9=900W, 18=1800W)
-        Byte 5: Operating status (~210=running, ~2=off)
-        Byte 6: Mode flags (240=on, 224=off)
+        Protocol 4.0 / D4E format (from wiki.womonet.io):
+        Byte 0: Room setpoint - temp = ((code - 170) mod 256) / 10, 0xAA=OFF
+        Byte 1: Control flags (bit0=heating, bit7=water mode inv)
+        Byte 2: Water setpoint (0xAA=OFF, 0xC3=ECO/40°C, 0xD0=HOT/60°C)
+        Byte 3: Fuel control (0xFA=enabled, 0x00=disabled)
+        Byte 4: Electric power level (×100W: 0=off, 9=900W, 18=1800W)
+        Byte 5: Ventilation (bits 4-7: level)
+        Byte 6: Constant (0xE0)
         Byte 7: Unknown (0x0F)
         """
         if len(data) < 7:
             return None
 
-        # Energy source decoding
-        diesel_on = data[3] == 250
-        electric_power = data[4] * 100  # 0, 900, or 1800
+        msgs = []
 
+        # Byte 0: Room temperature setpoint
+        room_code = data[0]
+        if room_code == 0xAA:
+            self.status.target_room_temp = 0  # OFF
+        else:
+            # D4E formula: temp = ((code - 170) mod 256) / 10
+            if room_code < 170:
+                room_code += 256
+            target_room = (room_code - 170) / 10.0
+            if 5 <= target_room <= 30:
+                self.status.target_room_temp = int(target_room)
+
+        # Byte 2: Water temperature setpoint
+        water_code = data[2]
+        if water_code == 0xAA:
+            self.status.target_water_temp = 0
+        elif water_code == 0xC3:
+            self.status.target_water_temp = 40  # ECO
+        elif water_code == 0xD0:
+            self.status.target_water_temp = 60  # HOT
+        else:
+            self.status.target_water_temp = water_code
+
+        # Byte 3: Fuel/diesel control
+        diesel_on = data[3] == 0xFA
         self.status.diesel_active = diesel_on
+
+        # Byte 4: Electric power
+        electric_power = data[4] * 100
         self.status.electric_power = electric_power
 
         # Determine energy mix
@@ -140,13 +168,13 @@ class TrumaDecoder:
         else:
             self.status.energy_mix = EnergyMix.NONE
 
-        # Operating status
-        op_byte = data[5]
+        # Byte 5: Ventilation level (bits 4-7)
+        vent_level = (data[5] >> 4) & 0x0F
+        # 0xB = Eco, 0xD = High
         was_operating = self.status.operating
-        self.status.operating = op_byte > 100  # ~210 when on, ~2 when off
+        self.status.operating = vent_level > 0
 
         # Build status message
-        msgs = []
         if self.status.operating != was_operating:
             state = "ON" if self.status.operating else "OFF"
             msgs.append(f"Heater {state}")
@@ -159,14 +187,13 @@ class TrumaDecoder:
         return " | ".join(msgs) if msgs else None
 
     def _decode_status_2(self, data: bytes) -> Optional[str]:
-        """Decode status frame 2 (0x21).
+        """Decode status frame 2 (0x21) - Heater Info 1.
 
-        Byte 0: Counter/sequence (changes frequently)
-        Byte 1: Unknown
-        Byte 2: Current room temperature (0.1°C units, single byte)
-        Byte 3: Current water temperature (°C, direct value)
-        Byte 4: Unknown
-        Byte 5: Water heater active (49=off, other values=active)
+        Protocol 4.0 / D4E format (from wiki.womonet.io):
+        Bytes 0-2: Two 12-bit temperatures packed in Kelvin×10
+        Byte 3: Burner power (×100W)
+        Byte 4: Electric power (×100W)
+        Byte 5: Status/energy/fan (bits 0-1: energy, bits 4-6: fan)
         Byte 6-7: Unknown (usually 0xF0 0x0F)
         """
         if len(data) < 6:
@@ -174,19 +201,27 @@ class TrumaDecoder:
 
         msgs = []
 
-        # Byte 2 contains current room temp in 0.1°C units
-        temp_raw = data[2]
-        if 50 < temp_raw < 400:  # Sanity check (5-40°C range)
-            self.status.current_room_temp = temp_raw / 10.0
-            msgs.append(f"Room: {self.status.current_room_temp:.1f}°C")
+        # Bytes 0-2: 12-bit packed temperatures in Kelvin×10
+        byte0, byte1, byte2 = data[0], data[1], data[2]
 
-        # Byte 3: current water temperature in °C
-        water_temp = data[3]
-        if 0 < water_temp < 100:  # Sanity check
-            self.status.current_water_temp = float(water_temp)
+        # Room temp: ((byte1 & 0x0F) << 8) | byte0
+        room_raw = ((byte1 & 0x0F) << 8) | byte0
+        room_celsius = room_raw / 10.0 - 273.0
+        if 0 < room_celsius < 50:  # Sanity check
+            self.status.current_room_temp = room_celsius
+            msgs.append(f"Room: {room_celsius:.1f}°C")
 
-        # Byte 5: water heater active
-        water_active = data[5] != 49  # 49 = off, other values = active
+        # Water temp: (byte2 << 4) | (byte1 >> 4)
+        water_raw = (byte2 << 4) | (byte1 >> 4)
+        water_celsius = water_raw / 10.0 - 273.0
+        if 0 < water_celsius < 100:  # Sanity check
+            self.status.current_water_temp = water_celsius
+
+        # Byte 5: status/energy/fan
+        status_byte = data[5]
+        # Bits 0-1: energy source active
+        # Bits 4-6: fan speed
+        water_active = (status_byte & 0x03) != 0
         if water_active != self.status.water_heater_active:
             self.status.water_heater_active = water_active
             state = "ON" if water_active else "OFF"
