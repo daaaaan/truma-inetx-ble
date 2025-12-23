@@ -237,35 +237,22 @@ class TrumaDecoder:
         return " | ".join(msgs) if msgs else None
 
     def _decode_status_3(self, data: bytes) -> Optional[str]:
-        """Decode status frame 3 (0x22).
+        """Decode status frame 3 (0x22) - Heater Info 2.
 
+        Protocol 4.0 / D4E format:
         Byte 0: Counter/status
         Byte 1: Unknown (often 240 or 112)
-        Byte 2: Water mode (16=ECO/OFF, 17=COMFORT, 49=HOT)
+        Byte 2: Status byte (not used for mode - 0x20 is authoritative)
         Byte 3: Status flags
         Byte 4-7: 0xFF padding
+
+        Note: Water mode is decoded from frame 0x20 byte 2, not here.
         """
         if len(data) < 4:
             return None
 
-        # Byte 2: water mode
-        water_byte = data[2]
-        old_mode = self.status.water_mode
-
-        if water_byte == 49:
-            self.status.water_mode = WaterMode.HOT
-        elif water_byte == 17:
-            self.status.water_mode = WaterMode.COMFORT
-        elif water_byte == 16:
-            # Could be ECO or OFF - check water_heater_active from 0x21
-            if self.status.water_heater_active:
-                self.status.water_mode = WaterMode.ECO
-            else:
-                self.status.water_mode = WaterMode.OFF
-
-        if self.status.water_mode != old_mode and self.status.water_mode is not None:
-            return f"Water mode: {self.status.water_mode.name}"
-
+        # Frame 0x22 contains status info, but water_mode comes from 0x20
+        # This frame may contain additional status we haven't decoded yet
         return None
 
     def _decode_transport_response(self, data: bytes) -> Optional[str]:
