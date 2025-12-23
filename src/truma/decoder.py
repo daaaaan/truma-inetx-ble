@@ -101,11 +101,22 @@ class TrumaDecoder:
         """Decode status frame 1 (0x20).
 
         Byte 0-1: Header/counter (changes frequently)
-        Byte 2-3: Unknown (was thought to be temp, but 0x21 has actual temp)
-        Byte 4-7: Unknown status bytes
+        Byte 2-3: Unknown
+        Byte 4: Unknown
+        Byte 5: Operating status (210=running, 2=off)
+        Byte 6: Mode flags (240=on, 224=off)
+        Byte 7: Unknown
         """
-        # 0x20 doesn't seem to contain current room temp
-        # Room temp is actually in 0x21 byte 2
+        if len(data) < 7:
+            return None
+
+        op_byte = data[5]
+        was_operating = self.status.operating
+        self.status.operating = op_byte > 100  # 210 when on, 2 when off
+
+        if self.status.operating != was_operating:
+            state = "ON" if self.status.operating else "OFF"
+            return f"Heater {state}"
         return None
 
     def _decode_status_2(self, data: bytes) -> Optional[str]:
