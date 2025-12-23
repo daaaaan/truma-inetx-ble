@@ -33,10 +33,18 @@ class EnergyMix(IntEnum):
 
 
 class WaterMode(IntEnum):
+    """Water heater mode.
+
+    Decoded from 0x22 byte2 and 0x21 byte5:
+    - OFF: byte2=16, byte5=49 (heater inactive)
+    - ECO: byte2=16, byte5=1 (heater active, low temp)
+    - COMFORT: byte2=17, byte5=1
+    - HOT: byte2=49, byte5=1
+    """
     OFF = 0
-    ECO = 40
-    HOT = 60
-    BOOST = 200
+    ECO = 1
+    COMFORT = 2
+    HOT = 3
 
 
 @dataclass
@@ -53,6 +61,8 @@ class TrumaStatus:
     energy_mix: Optional[EnergyMix] = None
     electric_power: int = 0                        # Watts (0, 900, 1800)
     diesel_active: bool = False
+    water_mode: Optional[WaterMode] = None
+    water_heater_active: bool = False
 
     # Status
     operating: bool = False
@@ -154,29 +164,60 @@ class TrumaDecoder:
         Byte 0: Counter/sequence (changes frequently)
         Byte 1: Unknown
         Byte 2: Current room temperature (0.1°C units, single byte)
-        Byte 3-7: Unknown status bytes
+        Byte 3: Unknown (maybe water temp related, often ~40)
+        Byte 4: Unknown
+        Byte 5: Water heater active (1=active, 49=off)
+        Byte 6-7: Unknown
         """
-        if len(data) < 3:
+        if len(data) < 6:
             return None
+
+        msgs = []
 
         # Byte 2 contains current room temp in 0.1°C units
         temp_raw = data[2]
         if 50 < temp_raw < 400:  # Sanity check (5-40°C range)
             self.status.current_room_temp = temp_raw / 10.0
-            return f"Room temp: {self.status.current_room_temp:.1f}°C"
-        return None
+            msgs.append(f"Room: {self.status.current_room_temp:.1f}°C")
+
+        # Byte 5: water heater active
+        water_active = data[5] != 49  # 49 = off, other values = active
+        if water_active != self.status.water_heater_active:
+            self.status.water_heater_active = water_active
+            state = "ON" if water_active else "OFF"
+            msgs.append(f"Water heater: {state}")
+
+        return " | ".join(msgs) if msgs else None
 
     def _decode_status_3(self, data: bytes) -> Optional[str]:
         """Decode status frame 3 (0x22).
 
-        Contains operating status flags.
+        Byte 0: Counter/status
+        Byte 1: Unknown (often 240 or 112)
+        Byte 2: Water mode (16=ECO/OFF, 17=COMFORT, 49=HOT)
+        Byte 3: Status flags
+        Byte 4-7: 0xFF padding
         """
         if len(data) < 4:
             return None
 
-        # Byte 3 appears to contain status flags
-        status_byte = data[3]
-        self.status.operating = (status_byte & 0x04) != 0
+        # Byte 2: water mode
+        water_byte = data[2]
+        old_mode = self.status.water_mode
+
+        if water_byte == 49:
+            self.status.water_mode = WaterMode.HOT
+        elif water_byte == 17:
+            self.status.water_mode = WaterMode.COMFORT
+        elif water_byte == 16:
+            # Could be ECO or OFF - check water_heater_active from 0x21
+            if self.status.water_heater_active:
+                self.status.water_mode = WaterMode.ECO
+            else:
+                self.status.water_mode = WaterMode.OFF
+
+        if self.status.water_mode != old_mode and self.status.water_mode is not None:
+            return f"Water mode: {self.status.water_mode.name}"
 
         return None
 
