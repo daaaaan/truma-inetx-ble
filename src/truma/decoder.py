@@ -140,13 +140,20 @@ class TrumaDecoder:
                 self.status.target_room_temp = int(target_room)
 
         # Byte 2: Water temperature setpoint
+        # 0xAA=OFF, 0xC3=ECO(40°C), 0xCD=COMFORT, 0xD0=HOT(60°C)
         water_code = data[2]
         if water_code == 0xAA:
             self.status.target_water_temp = 0
+            self.status.water_mode = WaterMode.OFF
         elif water_code == 0xC3:
             self.status.target_water_temp = 40  # ECO
+            self.status.water_mode = WaterMode.ECO
+        elif water_code == 0xCD:
+            self.status.target_water_temp = 50  # COMFORT (approx)
+            self.status.water_mode = WaterMode.COMFORT
         elif water_code == 0xD0:
             self.status.target_water_temp = 60  # HOT
+            self.status.water_mode = WaterMode.HOT
         else:
             self.status.target_water_temp = water_code
 

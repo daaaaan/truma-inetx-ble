@@ -94,7 +94,7 @@ Byte 15:   Frame checksum (two's complement)
 |------|-------|----------|
 | 0 | **Room setpoint** | `temp = ((code - 170) mod 256) / 10` (0xAA=OFF) |
 | 1 | Control flags | Bit0=heating enable, Bit7=water mode inv |
-| 2 | Water setpoint | 0xAA=OFF, 0xC3=ECO(40°C), 0xD0=HOT(60°C) |
+| 2 | Water setpoint | 0xAA=OFF, 0xC3=ECO(40°C), 0xCD=COMFORT, 0xD0=HOT(60°C) |
 | 3 | Fuel control | 0xFA=enabled, 0x00=disabled |
 | 4 | Electric power | ×100 for watts (0x00=off, 0x09=900W, 0x12=1800W) |
 | 5 | Ventilation | Bits4-7: level (0xB=Eco, 0xD=High) |
