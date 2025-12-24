@@ -7,6 +7,9 @@ Send commands to control heating, temperature, water heating, etc.
 import asyncio
 import struct
 import cbor2
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional, Any
 from bleak import BleakClient, BleakScanner
 
 # Truma BLE UUIDs
@@ -17,6 +20,148 @@ CHAR_NOTIFY_1 = "fc314003-f3b2-11e8-8eb2-f2801f1b9fd1"  # Notify
 CHAR_NOTIFY_2 = "fc314004-f3b2-11e8-8eb2-f2801f1b9fd1"  # Notify
 
 
+@dataclass
+class TrumaStatus:
+    """Current status of the Truma heater."""
+
+    # Temperatures (in Celsius)
+    current_room_temp: Optional[float] = None
+    target_room_temp: Optional[float] = None
+    current_water_temp: Optional[float] = None
+    target_water_temp: Optional[float] = None
+
+    # Operating modes
+    room_climate_mode: Optional[int] = None  # 0=off, 3=heating, 5=vent
+    water_heating_mode: Optional[int] = None  # 0=off, 1=eco/40, 2=hot/60
+    energy_mode: Optional[int] = None  # Energy source selection
+
+    # Status flags
+    heating_active: bool = False
+    water_heating_active: bool = False
+    error_code: Optional[int] = None
+
+    # Power/Energy
+    voltage: Optional[float] = None
+    electric_power: Optional[int] = None  # Watts
+
+    # Raw data storage for debugging
+    raw_params: dict = field(default_factory=dict)
+
+    # Last update time
+    last_update: Optional[datetime] = None
+
+    def update_from_cbor(self, cbor_data: dict):
+        """Update status from decoded CBOR notification data."""
+        self.last_update = datetime.now()
+
+        # Handle topic-based updates
+        if 'topics' in cbor_data:
+            for topic in cbor_data['topics']:
+                if not isinstance(topic, dict):
+                    continue
+                topic_name = topic.get('tn', '')
+                for param in topic.get('parameters', []):
+                    if not isinstance(param, dict):
+                        continue
+                    self._update_param(topic_name, param.get('pn'), param.get('v'))
+
+        # Handle direct parameter updates
+        if 'tn' in cbor_data and 'pn' in cbor_data:
+            self._update_param(cbor_data['tn'], cbor_data['pn'], cbor_data.get('v'))
+
+    def _update_param(self, topic: str, param: str, value: Any):
+        """Update a specific parameter."""
+        if param is None or value is None:
+            return
+
+        # Store raw for debugging
+        self.raw_params[f"{topic}.{param}"] = value
+
+        # Map to status fields
+        if topic == 'Temperature':
+            if param == 'CurTemp':
+                self.current_room_temp = value / 10.0 if isinstance(value, (int, float)) else None
+        elif topic == 'AirHeating':
+            if param == 'TgtTemp':
+                self.target_room_temp = value / 10.0 if isinstance(value, (int, float)) else None
+            elif param == 'OpState':
+                self.heating_active = value != 0
+        elif topic == 'RoomClimate':
+            if param == 'Mode':
+                self.room_climate_mode = value
+        elif topic == 'WaterHeating':
+            if param == 'Mode':
+                self.water_heating_mode = value
+            elif param == 'CurTemp':
+                self.current_water_temp = value / 10.0 if isinstance(value, (int, float)) else None
+            elif param == 'TgtTemp':
+                self.target_water_temp = value / 10.0 if isinstance(value, (int, float)) else None
+            elif param == 'OpState':
+                self.water_heating_active = value != 0
+        elif topic == 'PowerSupply':
+            if param == 'Volt':
+                self.voltage = value / 1000.0 if isinstance(value, (int, float)) else None
+        elif topic == 'EnergySrc':
+            if param == 'Mode':
+                self.energy_mode = value
+
+    @property
+    def room_mode_str(self) -> str:
+        """Human-readable room climate mode."""
+        modes = {0: 'OFF', 3: 'HEATING', 5: 'VENTILATING'}
+        return modes.get(self.room_climate_mode, f'UNKNOWN({self.room_climate_mode})')
+
+    @property
+    def water_mode_str(self) -> str:
+        """Human-readable water heating mode."""
+        modes = {0: 'OFF', 1: 'ECO (40°C)', 2: 'HOT (60°C)'}
+        return modes.get(self.water_heating_mode, f'UNKNOWN({self.water_heating_mode})')
+
+    def display(self):
+        """Print formatted status to console."""
+        print("\n" + "=" * 50)
+        print("        TRUMA HEATER STATUS")
+        print("=" * 50)
+
+        # Room climate
+        print("\n[ROOM CLIMATE]")
+        print(f"  Mode:        {self.room_mode_str}")
+        if self.current_room_temp is not None:
+            print(f"  Current:     {self.current_room_temp:.1f}°C")
+        else:
+            print(f"  Current:     --")
+        if self.target_room_temp is not None:
+            print(f"  Target:      {self.target_room_temp:.1f}°C")
+        else:
+            print(f"  Target:      --")
+        print(f"  Active:      {'YES' if self.heating_active else 'NO'}")
+
+        # Water heating
+        print("\n[WATER HEATING]")
+        print(f"  Mode:        {self.water_mode_str}")
+        if self.current_water_temp is not None:
+            print(f"  Current:     {self.current_water_temp:.1f}°C")
+        else:
+            print(f"  Current:     --")
+        if self.target_water_temp is not None:
+            print(f"  Target:      {self.target_water_temp:.1f}°C")
+        else:
+            print(f"  Target:      --")
+        print(f"  Active:      {'YES' if self.water_heating_active else 'NO'}")
+
+        # Power
+        print("\n[POWER]")
+        if self.voltage is not None:
+            print(f"  Voltage:     {self.voltage:.1f}V")
+        else:
+            print(f"  Voltage:     --")
+
+        # Last update
+        if self.last_update:
+            print(f"\nLast update: {self.last_update.strftime('%H:%M:%S')}")
+        print("=" * 50)
+
+
 class TrumaController:
     """Controller for Truma iNetX."""
 
@@ -25,6 +170,8 @@ class TrumaController:
         self.seq = 0
         self._transport_event = None
         self._last_notify = None
+        self.status = TrumaStatus()
+        self._verbose = False  # Print raw notifications
 
     def _build_command(self, topic: str, param: str, value) -> bytes:
         """Build a command packet matching the captured protocol format.
@@ -82,13 +229,19 @@ class TrumaController:
         services = self.client.services
         print(f"Services discovered")
 
-        # Subscribe to notifications on all relevant characteristics
+        # Enable notifications - must be done BEFORE transport layer works
+        # From capture: first write 0x0100 to CCCDs (handles 0x23, 0x28)
         try:
-            # Transport layer notifications come on CHAR_WRITE (0x22)
-            try:
-                await self.client.start_notify(CHAR_WRITE, self._on_notify)
-            except Exception:
-                pass  # May not support notifications
+            # Get the characteristic objects to find their CCCDs
+            for char in self.client.services.characteristics.values():
+                if char.uuid.lower() == CHAR_WRITE.lower():
+                    # Enable notifications on CHAR_WRITE's CCCD
+                    try:
+                        await self.client.start_notify(char, self._on_notify)
+                        print(f"Enabled notify on {char.uuid}")
+                    except Exception as e:
+                        print(f"Could not enable notify on CHAR_WRITE: {e}")
+
             await self.client.start_notify(CHAR_NOTIFY_1, self._on_notify)
             await self.client.start_notify(CHAR_NOTIFY_2, self._on_notify)
             print("Subscribed to notifications")
@@ -280,9 +433,45 @@ class TrumaController:
         self._last_notify = data
         if self._transport_event:
             self._transport_event.set()
-        # Only print if not a simple ACK
-        if len(data) > 3:
-            print(f"[NOTIFY] {data.hex()[:60]}...")
+
+        # Skip transport ACKs (short messages like 0x8100, 0xf001)
+        if len(data) <= 4:
+            return
+
+        # Try to decode CBOR from the notification
+        # Header is typically 18 bytes, CBOR starts after
+        cbor_data = self._decode_notification(data)
+        if cbor_data:
+            self.status.update_from_cbor(cbor_data)
+            if self._verbose:
+                print(f"[NOTIFY] {cbor_data}")
+
+    def _decode_notification(self, data: bytes) -> dict | None:
+        """Decode a notification payload containing CBOR data."""
+        if len(data) < 20:
+            return None
+
+        # Try common CBOR offsets (header is typically 18 bytes)
+        for offset in [18, 16, 20, 8]:
+            if offset >= len(data):
+                continue
+            try:
+                decoded = cbor2.loads(data[offset:])
+                if isinstance(decoded, dict):
+                    return decoded
+            except Exception:
+                continue
+
+        # Fallback: scan for CBOR markers
+        for i in range(len(data)):
+            if data[i] in (0xbf, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6):
+                try:
+                    decoded = cbor2.loads(data[i:])
+                    if isinstance(decoded, dict):
+                        return decoded
+                except Exception:
+                    continue
+        return None
 
     async def disconnect(self):
         """Disconnect from device."""
@@ -329,20 +518,72 @@ class TrumaController:
         await self.send_command('WaterHeating', 'Mode', value)
 
 
+async def monitor_status(ctrl: TrumaController, interval: float = 2.0):
+    """Continuously display status updates."""
+    import os
+
+    print("\nMonitoring status (Ctrl+C to stop)...")
+    try:
+        while True:
+            # Clear screen and show status
+            os.system('clear' if os.name != 'nt' else 'cls')
+            ctrl.status.display()
+
+            # Show raw params if any
+            if ctrl.status.raw_params:
+                print("\n[RAW PARAMETERS RECEIVED]")
+                for key, value in sorted(ctrl.status.raw_params.items()):
+                    print(f"  {key}: {value}")
+
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        pass
+
+
 async def main():
-    """Example usage."""
+    """Main entry point with CLI argument handling."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Truma iNetX BLE Controller')
+    parser.add_argument('--address', '-a', help='BLE address (auto-scan if not specified)')
+    parser.add_argument('--monitor', '-m', action='store_true', help='Monitor status continuously')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Show raw notifications')
+    parser.add_argument('--heat', type=str, choices=['on', 'off', 'vent'],
+                        help='Set heating mode')
+    parser.add_argument('--temp', type=float, help='Set target temperature (5-30°C)')
+    parser.add_argument('--water', type=str, choices=['off', 'eco', 'hot'],
+                        help='Set water heating mode')
+    args = parser.parse_args()
+
     ctrl = TrumaController()
+    ctrl._verbose = args.verbose
 
     try:
-        await ctrl.connect()
+        await ctrl.connect(args.address)
 
-        print("\n--- Setting heating to ON, 20°C ---")
-        await ctrl.set_heating_mode('heating')
-        await ctrl.set_target_temp(20.0)
+        # Process commands
+        if args.heat:
+            mode_map = {'on': 'heating', 'off': 'off', 'vent': 'ventilating'}
+            await ctrl.set_heating_mode(mode_map[args.heat])
 
-        print("\nCommands sent! Waiting for responses...")
-        await asyncio.sleep(3)
+        if args.temp:
+            await ctrl.set_target_temp(args.temp)
 
+        if args.water:
+            mode_map = {'off': 'off', 'eco': 'eco', 'hot': 'comfort'}
+            await ctrl.set_water_heating_mode(mode_map[args.water])
+
+        # Either monitor or wait briefly
+        if args.monitor:
+            await monitor_status(ctrl)
+        else:
+            # Wait a bit for initial status updates
+            print("\nWaiting for status updates...")
+            await asyncio.sleep(3)
+            ctrl.status.display()
+
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
     finally:
         await ctrl.disconnect()
         print("Disconnected.")
