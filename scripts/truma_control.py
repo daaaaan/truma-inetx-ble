@@ -23,6 +23,8 @@ class TrumaController:
     def __init__(self):
         self.client = None
         self.seq = 0
+        self._transport_event = None
+        self._last_notify = None
 
     def _build_command(self, topic: str, param: str, value) -> bytes:
         """Build a command packet matching the captured protocol format.
@@ -80,8 +82,13 @@ class TrumaController:
         services = self.client.services
         print(f"Services discovered")
 
-        # Try to subscribe to notifications (may fail if pairing required)
+        # Subscribe to notifications on all relevant characteristics
         try:
+            # Transport layer notifications come on CHAR_WRITE (0x22)
+            try:
+                await self.client.start_notify(CHAR_WRITE, self._on_notify)
+            except Exception:
+                pass  # May not support notifications
             await self.client.start_notify(CHAR_NOTIFY_1, self._on_notify)
             await self.client.start_notify(CHAR_NOTIFY_2, self._on_notify)
             print("Subscribed to notifications")
@@ -92,13 +99,21 @@ class TrumaController:
         await self._init_handshake()
 
     async def _init_handshake(self):
-        """Send initialization sequence required by iNetX."""
+        """Send initialization sequence required by iNetX (from captured traffic)."""
         import time
         import uuid
 
         print("Sending init handshake...")
 
-        # 1. Send SystemTime
+        # 1. Send protocol version (special header format)
+        await self._send_protocol_version()
+        await asyncio.sleep(0.1)
+
+        # 2. Subscribe to topics (required before commands work)
+        await self._subscribe_topics()
+        await asyncio.sleep(0.1)
+
+        # 3. Send SystemTime
         system_time = int(time.time())
         await self._send_raw_cbor({
             'avail': 1,
@@ -111,9 +126,9 @@ class TrumaController:
                 ]
             }]
         })
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.1)
 
-        # 2. Send MobileIdentity
+        # 4. Send MobileIdentity
         device_uuid = str(uuid.uuid4())
         await self._send_raw_cbor({
             'avail': 1,
@@ -125,7 +140,7 @@ class TrumaController:
                 ]
             }]
         })
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.1)
 
         await self._send_raw_cbor({
             'avail': 1,
@@ -138,13 +153,110 @@ class TrumaController:
                 ]
             }]
         })
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.1)
 
-        # 3. Send LastMessage marker
+        # 5. Send LastMessage marker
         await self._send_raw_cbor({'LastMessage': 1})
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
 
         print("Init handshake complete")
+
+    async def _send_protocol_version(self):
+        """Send protocol version packet (special format from capture)."""
+        # Captured: 0000ffff120001000000000000000000019ea1627076820501
+        # This has a different header format than regular messages
+        cbor_data = cbor2.dumps({'pv': [5, 1]})
+
+        header = bytearray(18)
+        header[0] = 0x00
+        header[1] = 0x00
+        header[2] = 0xff
+        header[3] = 0xff
+        struct.pack_into('<H', header, 4, len(cbor_data) + 11)
+        header[6] = 0x00
+        header[7] = 0x01
+        # Bytes 8-15 zeros
+        header[16] = 0x01
+        header[17] = 0x9e
+
+        packet = bytes(header) + cbor_data
+        await self._send_with_transport(packet)
+
+    async def _subscribe_topics(self):
+        """Subscribe to required topics before commands can work."""
+        # Topics discovered from capture - split into batches like the app does
+        topics_batch1 = [
+            'AirCirculation', 'AirCooling', 'AirHeating', 'DeviceManagement',
+            'EnergySrc', 'ErrorReset', 'FreshWater', 'GasBtl', 'GasControl', 'GreyWater'
+        ]
+        topics_batch2 = [
+            'Identify', 'L1Bat', 'L2Bat', 'LinePower', 'MobileIdentity',
+            'PowerSupply', 'RoomClimate', 'Switches', 'Temperature', 'Transfer'
+        ]
+        topics_batch3 = [
+            'VBat', 'WaterHeating', 'AmbientLight', 'Panel', 'BatteryMngmt',
+            'Install', 'Connect', 'TimerConfig', 'BleDeviceManagement', 'BluetoothDevice'
+        ]
+        topics_batch4 = ['System', 'Resources', 'PowerMgmt']
+
+        for batch in [topics_batch1, topics_batch2, topics_batch3, topics_batch4]:
+            await self._send_topic_subscription(batch)
+            await asyncio.sleep(0.05)
+
+    async def _send_topic_subscription(self, topics: list):
+        """Send a topic subscription message."""
+        self.seq += 1
+        cbor_data = cbor2.dumps({'tn': topics})
+
+        header = bytearray(18)
+        header[0] = 0x00
+        header[1] = 0x00
+        header[2] = 0x00
+        header[3] = 0x05
+        struct.pack_into('<H', header, 4, len(cbor_data) + 11)
+        header[6] = 0x03
+        header[7] = 0x00
+        header[16] = 0x02  # cmd_type 0x0002 for subscriptions
+        header[17] = 0x00
+
+        packet = bytes(header) + cbor_data
+        await self._send_with_transport(packet)
+
+    async def _send_with_transport(self, packet: bytes):
+        """Send a packet, attempting transport protocol if available.
+
+        Transport protocol (from captured traffic):
+        1. Write 01 <len_lo> <len_hi> to CHAR_WRITE (0x22) to announce message size
+        2. Wait for 8100 acknowledgment notification
+        3. Write actual message to CHAR_WRITE_NR (0x25)
+        4. Wait for f001 flow control notification
+        5. Send 0300 ACK if we receive data (83xx00)
+        """
+        # Try transport protocol, fall back to direct send if it fails
+        try:
+            # Announce message length
+            length_announce = bytes([0x01, len(packet) & 0xFF, (len(packet) >> 8) & 0xFF])
+            self._transport_event = asyncio.Event()
+            await self.client.write_gatt_char(CHAR_WRITE, length_announce, response=True)
+
+            # Wait for 8100 acknowledgment
+            try:
+                await asyncio.wait_for(self._transport_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+
+            self._transport_event.clear()
+        except Exception as e:
+            # Transport layer not available, skip to direct send
+            pass
+
+        # Send actual message
+        await self.client.write_gatt_char(CHAR_WRITE_NR, packet, response=False)
+
+        # Brief wait for response
+        await asyncio.sleep(0.1)
+
+        self._transport_event = None
 
     async def _send_raw_cbor(self, data):
         """Send raw CBOR data with header."""
@@ -161,11 +273,16 @@ class TrumaController:
         header[16:18] = b'\x01\x00'
 
         packet = bytes(header) + cbor_data
-        await self.client.write_gatt_char(CHAR_WRITE_NR, packet, response=False)
+        await self._send_with_transport(packet)
 
     def _on_notify(self, sender, data: bytes):
         """Handle notifications from device."""
-        print(f"[NOTIFY] {data.hex()[:60]}...")
+        self._last_notify = data
+        if self._transport_event:
+            self._transport_event.set()
+        # Only print if not a simple ACK
+        if len(data) > 3:
+            print(f"[NOTIFY] {data.hex()[:60]}...")
 
     async def disconnect(self):
         """Disconnect from device."""
@@ -173,12 +290,11 @@ class TrumaController:
             await self.client.disconnect()
 
     async def send_command(self, topic: str, param: str, value):
-        """Send a control command."""
+        """Send a control command using transport protocol."""
         cmd = self._build_command(topic, param, value)
         print(f"Sending: {topic}.{param} = {value}")
-        print(f"  Packet: {cmd.hex()}")
-        await self.client.write_gatt_char(CHAR_WRITE_NR, cmd, response=False)
-        await asyncio.sleep(0.5)  # Wait for response
+        await self._send_with_transport(cmd)
+        await asyncio.sleep(0.2)  # Brief pause between commands
 
     # High-level commands
 
