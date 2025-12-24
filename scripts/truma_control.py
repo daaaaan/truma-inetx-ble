@@ -7,10 +7,16 @@ Send commands to control heating, temperature, water heating, etc.
 import asyncio
 import struct
 import cbor2
+import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Any
 from bleak import BleakClient, BleakScanner
+
+# Identity file to persist client credentials across sessions
+IDENTITY_FILE = Path(__file__).parent / ".truma_identity.json"
 
 # Truma BLE UUIDs
 SERVICE_UUID = "fc314000-f3b2-11e8-8eb2-f2801f1b9fd1"
@@ -162,6 +168,38 @@ class TrumaStatus:
         print("=" * 50)
 
 
+def load_identity() -> dict:
+    """Load or create persistent client identity."""
+    if IDENTITY_FILE.exists():
+        try:
+            with open(IDENTITY_FILE) as f:
+                identity = json.load(f)
+                print(f"Loaded identity: {identity['muid'][:8]}...")
+                return identity
+        except Exception as e:
+            print(f"Failed to load identity: {e}")
+
+    # Generate new identity (matching the format from captured traffic)
+    import uuid
+    identity = {
+        "muid": str(uuid.uuid4()).upper(),
+        "uuid": str(uuid.uuid4()).lower(),
+        "username": "Vanlin Controller"
+    }
+    save_identity(identity)
+    print(f"Created new identity: {identity['muid'][:8]}...")
+    return identity
+
+
+def save_identity(identity: dict):
+    """Save client identity for reconnection."""
+    try:
+        with open(IDENTITY_FILE, 'w') as f:
+            json.dump(identity, f, indent=2)
+    except Exception as e:
+        print(f"Failed to save identity: {e}")
+
+
 class TrumaController:
     """Controller for Truma iNetX."""
 
@@ -169,9 +207,11 @@ class TrumaController:
         self.client = None
         self.seq = 0
         self._transport_event = None
+        self._transport_ack = None  # For tracking ACK type
         self._last_notify = None
         self.status = TrumaStatus()
         self._verbose = False  # Print raw notifications
+        self.identity = load_identity()  # Load persistent identity
 
     def _build_command(self, topic: str, param: str, value) -> bytes:
         """Build a command packet matching the captured protocol format.
@@ -209,8 +249,13 @@ class TrumaController:
 
         return bytes(header) + cbor_data
 
-    async def connect(self, address: str = None):
-        """Connect to iNetX."""
+    async def connect(self, address: str = None, pair: bool = False):
+        """Connect to iNetX.
+
+        Args:
+            address: BLE address (auto-scans if not provided)
+            pair: If True, initiate pairing after connection
+        """
         if address is None:
             print("Scanning for iNetX...")
             devices = await BleakScanner.discover(timeout=5.0)
@@ -222,8 +267,12 @@ class TrumaController:
 
         print("Connecting...")
         self.client = BleakClient(address, timeout=30.0)
-        await self.client.connect()
+        # Some devices require pairing before connecting properly
+        await self.client.connect(pair_before_connect=pair)
         print("Connected!")
+
+        if pair:
+            print("Pairing initiated during connection")
 
         # Discover services
         services = self.client.services
@@ -252,11 +301,15 @@ class TrumaController:
         await self._init_handshake()
 
     async def _init_handshake(self):
-        """Send initialization sequence required by iNetX (from captured traffic)."""
+        """Send initialization sequence required by iNetX (from captured traffic).
+
+        CRITICAL: Must use persistent identity (Muid/Uuid) for reconnection to work.
+        The iNetX device rejects connections from "new" clients after initial pairing.
+        """
         import time
-        import uuid
 
         print("Sending init handshake...")
+        print(f"Using identity: {self.identity['muid'][:8]}...")
 
         # 1. Send protocol version (special header format)
         await self._send_protocol_version()
@@ -281,15 +334,14 @@ class TrumaController:
         })
         await asyncio.sleep(0.1)
 
-        # 4. Send MobileIdentity
-        device_uuid = str(uuid.uuid4())
+        # 4. Send MobileIdentity - MUST use persistent identity!
         await self._send_raw_cbor({
             'avail': 1,
             'topics': [{
                 'tn': 'MobileIdentity',
                 'id': 0,
                 'parameters': [
-                    {'v': 'Vanlin Controller', 'id': 0, 'type': 4, 'pn': 'UserName', 'tn': 'MobileIdentity'}
+                    {'v': self.identity['username'], 'id': 0, 'type': 4, 'pn': 'UserName', 'tn': 'MobileIdentity'}
                 ]
             }]
         })
@@ -301,8 +353,8 @@ class TrumaController:
                 'tn': 'MobileIdentity',
                 'id': 0,
                 'parameters': [
-                    {'v': device_uuid, 'id': 0, 'type': 4, 'pn': 'Muid', 'tn': 'MobileIdentity'},
-                    {'v': device_uuid, 'id': 0, 'type': 4, 'pn': 'Uuid', 'tn': 'MobileIdentity'}
+                    {'v': self.identity['muid'], 'id': 0, 'type': 4, 'pn': 'Muid', 'tn': 'MobileIdentity'},
+                    {'v': self.identity['uuid'], 'id': 0, 'type': 4, 'pn': 'Uuid', 'tn': 'MobileIdentity'}
                 ]
             }]
         })
@@ -376,40 +428,59 @@ class TrumaController:
         await self._send_with_transport(packet)
 
     async def _send_with_transport(self, packet: bytes):
-        """Send a packet, attempting transport protocol if available.
+        """Send a packet using transport protocol (from captured traffic).
 
-        Transport protocol (from captured traffic):
-        1. Write 01 <len_lo> <len_hi> to CHAR_WRITE (0x22) to announce message size
-        2. Wait for 8100 acknowledgment notification
-        3. Write actual message to CHAR_WRITE_NR (0x25)
-        4. Wait for f001 flow control notification
-        5. Send 0300 ACK if we receive data (83xx00)
+        Transport protocol sequence:
+        1. TX: 01 <len_lo> <len_hi> to CHAR_WRITE (0x22) - announce message size
+        2. RX: 81 00 - ready acknowledgment
+        3. TX: actual message to CHAR_WRITE_NR (0x25)
+        4. RX: f0 01 - flow control / data ready
+        5. RX: 83 xx 00 - message ACK with ID
+        6. TX: 03 00 - confirm receipt
         """
-        # Try transport protocol, fall back to direct send if it fails
         try:
-            # Announce message length
+            # 1. Announce message length
             length_announce = bytes([0x01, len(packet) & 0xFF, (len(packet) >> 8) & 0xFF])
             self._transport_event = asyncio.Event()
+            self._transport_ack = None
             await self.client.write_gatt_char(CHAR_WRITE, length_announce, response=True)
 
-            # Wait for 8100 acknowledgment
+            # 2. Wait for 8100 ready acknowledgment
             try:
-                await asyncio.wait_for(self._transport_event.wait(), timeout=1.0)
+                await asyncio.wait_for(self._transport_event.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                if self._verbose:
+                    print("[TRANSPORT] Timeout waiting for 8100 ACK")
+
+            self._transport_event.clear()
+
+            # 3. Send actual message
+            await self.client.write_gatt_char(CHAR_WRITE_NR, packet, response=False)
+
+            # 4. Wait for f001 flow control
+            try:
+                await asyncio.wait_for(self._transport_event.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                if self._verbose:
+                    print("[TRANSPORT] Timeout waiting for f001")
+
+            self._transport_event.clear()
+
+            # 5. Wait for 83xx00 message ACK and send 0300 confirmation
+            try:
+                await asyncio.wait_for(self._transport_event.wait(), timeout=2.0)
+                if self._transport_ack and self._transport_ack.startswith(b'\x83'):
+                    # 6. Send confirmation
+                    await self.client.write_gatt_char(CHAR_WRITE, b'\x03\x00', response=True)
             except asyncio.TimeoutError:
                 pass
 
-            self._transport_event.clear()
         except Exception as e:
-            # Transport layer not available, skip to direct send
-            pass
-
-        # Send actual message
-        await self.client.write_gatt_char(CHAR_WRITE_NR, packet, response=False)
-
-        # Brief wait for response
-        await asyncio.sleep(0.1)
+            if self._verbose:
+                print(f"[TRANSPORT] Error: {e}")
 
         self._transport_event = None
+        self._transport_ack = None
 
     async def _send_raw_cbor(self, data):
         """Send raw CBOR data with header."""
@@ -431,12 +502,19 @@ class TrumaController:
     def _on_notify(self, sender, data: bytes):
         """Handle notifications from device."""
         self._last_notify = data
+
+        # Handle transport layer ACKs
+        if len(data) <= 4:
+            self._transport_ack = data
+            if self._transport_event:
+                self._transport_event.set()
+            if self._verbose:
+                print(f"[TRANSPORT ACK] {data.hex()}")
+            return
+
+        # Signal transport event for longer messages too
         if self._transport_event:
             self._transport_event.set()
-
-        # Skip transport ACKs (short messages like 0x8100, 0xf001)
-        if len(data) <= 4:
-            return
 
         # Try to decode CBOR from the notification
         # Header is typically 18 bytes, CBOR starts after
@@ -546,6 +624,9 @@ async def main():
 
     parser = argparse.ArgumentParser(description='Truma iNetX BLE Controller')
     parser.add_argument('--address', '-a', help='BLE address (auto-scan if not specified)')
+    parser.add_argument('--pair', '-p', action='store_true', help='Initiate pairing with device')
+    parser.add_argument('--reset-identity', action='store_true',
+                        help='Reset client identity (use when re-pairing)')
     parser.add_argument('--monitor', '-m', action='store_true', help='Monitor status continuously')
     parser.add_argument('--verbose', '-v', action='store_true', help='Show raw notifications')
     parser.add_argument('--heat', type=str, choices=['on', 'off', 'vent'],
@@ -555,11 +636,22 @@ async def main():
                         help='Set water heating mode')
     args = parser.parse_args()
 
+    # Handle identity reset before anything else
+    if args.reset_identity:
+        if IDENTITY_FILE.exists():
+            IDENTITY_FILE.unlink()
+            print("Identity reset. New identity will be created on next connection.")
+        else:
+            print("No existing identity found.")
+        if not args.pair:
+            print("Use --pair with --reset-identity to establish new pairing.")
+            return
+
     ctrl = TrumaController()
     ctrl._verbose = args.verbose
 
     try:
-        await ctrl.connect(args.address)
+        await ctrl.connect(args.address, pair=args.pair)
 
         # Process commands
         if args.heat:
