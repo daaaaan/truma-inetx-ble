@@ -281,7 +281,7 @@ class TrumaMqtt:
         sys_data = status.get("system")
         if sys_data:
             flame = sys_data.get("flame_status")
-            pub("truma/system/flame", "ON" if flame and flame > 0 else "OFF", retain=True)
+            pub("truma/system/flame", "ON" if flame is not None and flame > 0 else "OFF", retain=True)
             if sys_data.get("internal_temp_c") is not None:
                 pub("truma/system/internal_temp", str(sys_data["internal_temp_c"]), retain=True)
 
