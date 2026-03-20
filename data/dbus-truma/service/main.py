@@ -38,10 +38,12 @@ class TrumaService:
         self.rest_api = None
         self._running = False
         self._reconnect_delay = 5  # seconds, increases on failure
+        self._loop = None  # set in start()
 
     async def start(self):
         """Start the service."""
         self._running = True
+        self._loop = asyncio.get_event_loop()
 
         # Setup logging
         logging.basicConfig(
@@ -177,7 +179,7 @@ class TrumaService:
             return
 
     def _handle_command(self, topic: str, param: str, value: int) -> tuple:
-        """Handle command from REST API (sync)."""
+        """Handle command from REST API (sync, called from HTTP thread)."""
         # Validate
         ok, msg = self.state.validate_command(topic, param, value)
         if not ok:
@@ -186,10 +188,13 @@ class TrumaService:
         if not self.state.connected:
             return False, "not connected"
 
-        # Send via BLE (fire and forget from sync context)
+        # Send via BLE — schedule on the asyncio event loop (thread-safe)
         dest = self.state.get_command_dest(topic)
         frame = build_write_frame(self.transport.assigned_addr, dest, topic, param, value)
-        asyncio.ensure_future(self.transport.send(frame))
+        if self._loop:
+            self._loop.call_soon_threadsafe(
+                lambda: self._loop.create_task(self.transport.send(frame))
+            )
         return True, f"sent {topic}.{param}={value}"
 
     def _handle_command_async(self, topic: str, param: str, value: int):
