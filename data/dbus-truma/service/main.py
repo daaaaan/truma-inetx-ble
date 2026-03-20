@@ -96,20 +96,25 @@ class TrumaService:
         await self.transport.connect()
         self._reconnect_delay = 5  # reset on successful connect
 
-        # 2. Register
+        # 2. Register — wait for assigned addr before proceeding
         logger.info("Registering (pv=[5,1])...")
         reg_frame = build_register_frame(self.transport.assigned_addr)
         await self.transport.send(reg_frame)
-        await asyncio.sleep(3)  # wait for registration response
+        # Wait for registration response (addr assignment)
+        for _ in range(20):
+            await asyncio.sleep(1)
+            if self.transport.assigned_addr != 0x0500:
+                break
         self.state.assigned_addr = self.transport.assigned_addr
+        logger.info("Using addr: 0x%04X", self.transport.assigned_addr)
 
-        # 3. Subscribe all topics in batches
+        # 3. Subscribe all topics in batches (using assigned addr)
         logger.info("Subscribing to %d topic batches...", len(TOPIC_BATCHES))
         for i, batch in enumerate(TOPIC_BATCHES):
             sub_frame = build_subscribe_frame(self.transport.assigned_addr, batch)
             await self.transport.send(sub_frame)
-            await asyncio.sleep(0.3)
-        await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
+        await asyncio.sleep(3)
 
         # 4. Send identity sequence
         logger.info("Sending identity...")
@@ -119,7 +124,7 @@ class TrumaService:
         )
         for frame in identity_frames:
             await self.transport.send(frame)
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.5)
 
         # 5. Mark connected
         self.state.connected = True

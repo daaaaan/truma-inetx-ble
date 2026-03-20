@@ -118,18 +118,34 @@ class BleTransport:
                 else:
                     raise
 
-        # 5. Wait for ServicesResolved
+        # 5. Wait for ServicesResolved (with initial delay for BLE setup)
+        await asyncio.sleep(2)
         log.info("Waiting for ServicesResolved...")
-        for _ in range(30):
-            resolved = await self._dev_props.call_get(BLUEZ + ".Device1", "ServicesResolved")
-            if resolved.value:
-                break
+        for i in range(30):
+            try:
+                resolved = await self._dev_props.call_get(BLUEZ + ".Device1", "ServicesResolved")
+                if resolved.value:
+                    log.info("ServicesResolved after %.1fs", i * 0.5)
+                    break
+            except Exception:
+                pass
             await asyncio.sleep(0.5)
         else:
-            log.warning("ServicesResolved not seen after 15s, continuing anyway")
+            log.warning("ServicesResolved not seen after 15s, trying discovery anyway")
 
-        # 6. Discover characteristics
+        # 6. Discover characteristics (try even if not resolved — may be cached)
         await self._discover_chars(dev_path)
+        if not self.chars:
+            # Retry after reconnect — sometimes BlueZ needs a kick
+            log.info("No chars found, forcing reconnect...")
+            try:
+                await self.device.call_disconnect()
+                await asyncio.sleep(2)
+                await self.device.call_connect()
+                await asyncio.sleep(3)
+                await self._discover_chars(dev_path)
+            except Exception as e:
+                log.warning("Reconnect attempt: %s", e)
         log.info("Found %d characteristics", len(self.chars))
 
         # 7. Subscribe notifications on CMD + DATA_R (NOT CMD_ALT)
@@ -272,29 +288,68 @@ class BleTransport:
 
         Forces CCCD re-write by calling StopNotify then StartNotify.
         """
+        # Build reverse lookup: D-Bus path -> char UUID
+        self._path_to_uuid = {}
+
         for char_uuid in [CHAR_CMD, CHAR_DATA_R]:
             if char_uuid not in self.chars:
-                log.warning("Char %s not found, skipping notify", char_uuid[-4:])
+                log.warning("Char %s not found, skipping notify", char_uuid)
                 continue
+            path = self.chars[char_uuid]
+            self._path_to_uuid[path] = char_uuid
+            label = "CMD" if char_uuid == CHAR_CMD else "DATA_R"
+            log.info("  Subscribing %s at %s", label, path)
             try:
-                path = self.chars[char_uuid]
                 intr = await self.bus.introspect(BLUEZ, path)
                 obj = self.bus.get_proxy_object(BLUEZ, path, intr)
                 iface = obj.get_interface("org.bluez.GattCharacteristic1")
                 props_iface = obj.get_interface("org.freedesktop.DBus.Properties")
 
-                # Force CCCD re-write: disable then enable
+                # Force CCCD re-write
                 try:
                     await iface.call_stop_notify()
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)
                 except Exception:
                     pass
 
+                # Register per-object signal handler
                 props_iface.on_properties_changed(self._make_notify_handler(char_uuid))
+
+                # Also add explicit D-Bus match rule for this path
+                await self.bus.call(
+                    await self.bus.introspect("org.freedesktop.DBus", "/org/freedesktop/DBus").then(
+                        lambda _: None
+                    ) if False else None
+                ) if False else None
+                # dbus-fast should add the match rule via on_properties_changed,
+                # but let's also try adding one explicitly
+                try:
+                    from dbus_fast import Message
+                    match_rule = (
+                        f"type='signal',"
+                        f"interface='org.freedesktop.DBus.Properties',"
+                        f"member='PropertiesChanged',"
+                        f"path='{path}'"
+                    )
+                    reply = await self.bus.call(
+                        Message(
+                            destination="org.freedesktop.DBus",
+                            path="/org/freedesktop/DBus",
+                            interface="org.freedesktop.DBus",
+                            member="AddMatch",
+                            signature="s",
+                            body=[match_rule],
+                        )
+                    )
+                    log.info("  Added match rule for %s", label)
+                except Exception as e:
+                    log.warning("  Match rule for %s: %s", label, e)
+
                 await iface.call_start_notify()
-                log.info("  Subscribed: %s", char_uuid[-4:])
+                await asyncio.sleep(1)
+                log.info("  Subscribed %s OK", label)
             except Exception as exc:
-                log.warning("  Notify failed %s: %s", char_uuid[-4:], exc)
+                log.warning("  Notify failed %s: %s", char_uuid, exc)
 
     def _make_notify_handler(self, char_uuid):
         """Return a PropertiesChanged handler bound to char_uuid."""
@@ -306,9 +361,17 @@ class BleTransport:
 
     def _handle_notification(self, char_uuid, data):
         """Handle BLE notifications from CMD or DATA_R."""
-        log.debug("[RX %s] %db: %s", char_uuid[-4:], len(data), data[:8].hex())
+        label = "CMD" if char_uuid == CHAR_CMD else "DATA" if char_uuid == CHAR_DATA_R else "???"
+        log.info("[RX %s] %db: %s", label, len(data), data[:16].hex())
 
         if len(data) <= 4:
+            # Check for MsgAck (0x83) FIRST — must auto-confirm with 0300
+            if len(data) >= 1 and data[0] == TRANSPORT_MSG_ACK:
+                log.info("  -> MsgAck, confirming 0300")
+                asyncio.ensure_future(self._write_char(
+                    CHAR_CMD, bytes([TRANSPORT_CONFIRM, 0x00])
+                ))
+
             # Transport ACK (Ready, DataAck, etc.)
             self._transport_ack = data
             if self._transport_event:
@@ -316,11 +379,6 @@ class BleTransport:
             return
 
         if char_uuid == CHAR_CMD:
-            # MsgAck from device: auto-confirm
-            if len(data) >= 1 and data[0] == TRANSPORT_MSG_ACK:
-                asyncio.ensure_future(self._write_char(
-                    CHAR_CMD, bytes([TRANSPORT_CONFIRM, 0x00])
-                ))
             # Signal transport event for any CMD notification > 4 bytes
             if self._transport_event:
                 self._transport_event.set()
@@ -351,9 +409,15 @@ class BleTransport:
         return self._char_ifaces[char_uuid]
 
     async def _write_char(self, char_uuid, data):
-        """Write bytes to a GATT characteristic (write-without-response / command)."""
+        """Write bytes to a GATT characteristic.
+
+        CMD (fc314001) uses Write Request (with response).
+        DATA_W (fc314002) uses Write Command (without response).
+        """
         if char_uuid not in self.chars:
             log.error("Characteristic %s not found", char_uuid[-4:])
             return
         char = await self._get_char_iface(char_uuid)
-        await char.call_write_value(bytes(data), {"type": Variant("s", "command")})
+        # CMD uses "request" (Write Request, ATT 0x12), DATA_W uses "command" (ATT 0x52)
+        write_type = "request" if char_uuid == CHAR_CMD else "command"
+        await char.call_write_value(bytes(data), {"type": Variant("s", write_type)})
