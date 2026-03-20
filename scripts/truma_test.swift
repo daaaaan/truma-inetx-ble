@@ -386,23 +386,32 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         Thread.sleep(forTimeInterval: 2)
         drainAndDecode()
 
-        // 6. Listen for live data
-        print("\n--- Listening 30s for live data ---")
-        for i in 0..<6 {
+        // 6. Device Discovery (per capture: sent after subscribe)
+        print("\n--- Device Discovery ---")
+        let ddFrame = v3Frame(dest: 0x0000, src: myAddr, ctrl: 0x02, sub: 0x01, corr: 0, cbor: Data())
+        let _ = sendTransport(ddFrame)
+        Thread.sleep(forTimeInterval: 2)
+        drainAndDecode()
+
+        // 7. Parameter Discovery to heater (0x0201) and panel (0x0101)
+        print("\n--- Parameter Discovery ---")
+        for devAddr: UInt16 in [0x0201, 0x0101] {
+            let pdFrame = v3Frame(dest: devAddr, src: myAddr, ctrl: 0x03, sub: 0x04, corr: 0, cbor: Data())
+            let _ = sendTransport(pdFrame)
+            Thread.sleep(forTimeInterval: 1)
+        }
+        Thread.sleep(forTimeInterval: 3)
+        drainAndDecode()
+
+        // 8. Listen for live data
+        print("\n--- Listening 15s for live data ---")
+        for i in 0..<3 {
             Thread.sleep(forTimeInterval: 5)
             drainAndDecode()
-            if i < 5 { print("  ... \((i+1)*5)s ...") }
+            if i < 2 { print("  ... \((i+1)*5)s ...") }
         }
 
         displayStatus()
-
-        // 7. Test command: read AirHeating
-        print("\n--- Test: Write AirHeating.TgtTemp ---")
-        let readCbor = cborMap([("tn", "AirHeating" as Any), ("pn", "TgtTemp" as Any), ("v", 0 as Any)])
-        let readFrame = v3Frame(dest: 0x0101, src: myAddr, ctrl: 0x03, sub: 0x01, corr: 0, cbor: readCbor)
-        let _ = sendTransport(readFrame)
-        Thread.sleep(forTimeInterval: 5)
-        drainAndDecode()
 
         displayStatus()
         finish()
