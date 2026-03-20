@@ -11,7 +11,7 @@ import time
 
 from .const import TOPIC_BATCHES
 from .protocol import (
-    build_register_frame, build_subscribe_frame,
+    build_v3_frame, build_register_frame, build_subscribe_frame,
     build_identity_frames, build_write_frame, parse_v3_frame
 )
 from .ble_transport import BleTransport
@@ -143,6 +143,16 @@ class TrumaService:
             await self.transport.send(frame)
             await asyncio.sleep(0.5)
 
+        # 5. Parameter discovery — request current values from heater + panel
+        logger.info("Requesting parameter discovery...")
+        for dev_addr in [0x0201, 0x0101]:  # heater, panel
+            pd_frame = build_v3_frame(
+                dev_addr, self.transport.assigned_addr,
+                0x03, 0x04, 0, b''  # MBP PARAM_DISC, empty payload
+            )
+            await self.transport.send(pd_frame)
+            await asyncio.sleep(3)  # wait for multi-response
+
         # 5. Mark connected
         self.state.connected = True
         logger.info("Connected and subscribed! Listening for data...")
@@ -191,6 +201,26 @@ class TrumaService:
             v = cbor.get('v')
             if tn and pn and v is not None:
                 self.state.update(tn, pn, v)
+            return
+
+        # Parameter Discovery Response: ctrl=0x03, sub=0x84
+        # These contain current values — parse them into state
+        if control_raw == 0x03 and sub_type == 0x84:
+            topics = cbor.get('topics', [])
+            if isinstance(topics, list):
+                for topic in topics:
+                    if not isinstance(topic, dict):
+                        continue
+                    tn = topic.get('tn', '')
+                    params = topic.get('parameters', [])
+                    if isinstance(params, list):
+                        for p in params:
+                            if not isinstance(p, dict):
+                                continue
+                            pn = p.get('pn', '')
+                            v = p.get('v')
+                            if tn and pn and v is not None:
+                                self.state.update(tn, pn, v)
             return
 
     def _handle_command(self, topic: str, param: str, value: int) -> tuple:
