@@ -25,6 +25,12 @@ try:
 except Exception:
     HAS_DBUS = False
 
+try:
+    from .mqtt_ha import TrumaMqtt
+    HAS_MQTT = True
+except Exception:
+    HAS_MQTT = False
+
 logger = logging.getLogger("truma")
 
 
@@ -65,6 +71,15 @@ class TrumaService:
             port=8090
         )
         self.rest_api.start()
+
+        # Start MQTT with HA auto-discovery
+        if HAS_MQTT:
+            self.mqtt = TrumaMqtt(
+                state_getter=self.state.get_status,
+                command_sender=self._handle_command,
+            )
+            self.mqtt.start()
+            logger.info("MQTT HA discovery started")
 
         # Start D-Bus service (if available)
         if HAS_DBUS:
@@ -219,6 +234,8 @@ class TrumaService:
         self._running = False
         if self.rest_api:
             self.rest_api.stop()
+        if hasattr(self, 'mqtt') and self.mqtt:
+            self.mqtt.stop()
         await self.transport.disconnect()
         logger.info("Shutdown complete")
 
