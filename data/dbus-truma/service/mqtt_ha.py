@@ -13,7 +13,7 @@ except ImportError:
 
 log = logging.getLogger("truma.mqtt")
 
-MQTT_HOST = "localhost"
+MQTT_HOST = "192.168.1.55"
 MQTT_PORT = 1883
 DEVICE_INFO = {
     "identifiers": ["truma_heater"],
