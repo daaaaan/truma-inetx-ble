@@ -106,6 +106,7 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     // MARK: - Transport send
     func sendTransport(_ packet: Data) -> Bool {
+        // Step 1: InitDataTransfer
         let announce = Data([0x01, UInt8(packet.count & 0xFF), UInt8(packet.count >> 8)])
         print("  TX CMD: \(announce.hex)  [InitDataTransfer sz=\(packet.count)]")
 
@@ -114,23 +115,39 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return false
         }
 
-        // Wait for 0x8100 ready
-        if let ack = waitNotify(timeout: 3), ack.count >= 2 {
-            print("  RX CMD: \(ack.hex)")
+        // Step 2: Wait for Ready (0x81 0x00)
+        guard let ready = waitNotify(timeout: 5) else {
+            print("  [timeout waiting for Ready]")
+            return false
+        }
+        print("  RX: \(ready.hex)")
+        if ready.count >= 2 && ready[1] != 0x00 {
+            print("  [NOT READY: status=0x\(String(format:"%02X", ready[1]))]")
+            return false
         }
 
-        // Send data
+        // Step 3: Send data
         print("  TX DATA (\(packet.count)b): \(packet.prefix(30).hex)...")
         writeData(packet)
 
-        // Wait for 0xf001
-        if let ack = waitNotify(timeout: 3), ack.count >= 2 {
-            print("  RX: \(ack.hex)")
+        // Step 4: Wait for AckDataTransfer (0xF0 0x01)
+        guard let ack1 = waitNotify(timeout: 5) else {
+            print("  [timeout waiting for DataAck]")
+            return false
         }
+        print("  RX: \(ack1.hex)")
 
-        // Wait for 0x83xx00 and confirm
-        if let ack = waitNotify(timeout: 3), ack.count > 0, ack[0] == 0x83 {
-            print("  RX: \(ack.hex) -> TX confirm 0300")
+        // Step 5: Wait for message ack (0x83 XX 0x00)
+        guard let ack2 = waitNotify(timeout: 5) else {
+            print("  [timeout waiting for MsgAck]")
+            // Still OK — some messages don't get 0x83
+            return true
+        }
+        print("  RX: \(ack2.hex)")
+
+        // Step 6: Send confirm if we got 0x83
+        if ack2.count > 0 && ack2[0] == 0x83 {
+            print("  TX CMD: 0300  [confirm]")
             let _ = writeCmd(Data([0x03, 0x00]))
         }
 
@@ -146,22 +163,7 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         print("\n" + String(repeating: "=", count: 50))
         print("  TRUMA PROTOCOL TEST")
         print(String(repeating: "=", count: 50))
-
-        // Strategy A: Try transport protocol first
-        print("\n--- A: Transport write test ---")
-        let testData = Data([0x01, 0x05, 0x00])
-        if let err = writeCmd(testData) {
-            print("  CMD write failed (code \((err as NSError).code))")
-            print("  Falling back to DIRECT DATA writes (no transport)")
-            print("")
-            _runDirectTests()
-            return
-        }
-        print("  CMD write OK! Using transport protocol.")
-        // Abort the test transport (send 0 bytes)
-        Thread.sleep(forTimeInterval: 1)
         _runTransportTests()
-
     }
 
     func _runDirectTests() {
@@ -353,6 +355,23 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         let label = c.uuid == CHAR_CMD ? "CMD" : c.uuid == CHAR_DATA_R ? "DATA" : c.uuid == CHAR_CMD_ALT ? "CMD2" : "?"
         print("  RX \(label) (\(data.count)b): \(data.prefix(20).hex)\(data.count > 20 ? "..." : "")")
         rxData.append(data)
+
+        // Handle inbound transport: when Truma sends data on DATA_R, ACK it
+        if c.uuid == CHAR_DATA_R && data.count > 4 {
+            print("  -> Incoming data! Sending ACK f001")
+            if let cmdChar = chars[CHAR_CMD] {
+                p.writeValue(Data([0xF0, 0x01]), for: cmdChar, type: .withResponse)
+            }
+        }
+
+        // When we receive 0x83 (message ack from Truma), send 0x03 0x00 confirm
+        if c.uuid == CHAR_CMD && data.count >= 2 && data[0] == 0x83 {
+            print("  -> MsgAck received, sending confirm 0300")
+            if let cmdChar = chars[CHAR_CMD] {
+                p.writeValue(Data([0x03, 0x00]), for: cmdChar, type: .withResponse)
+            }
+        }
+
         notifySem.signal()
     }
 
