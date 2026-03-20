@@ -26,6 +26,8 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     var params: [String: Any] = [:] // topic.param -> value
+    var paramSchemas: [String: String] = [:] // topic.param -> schema description
+    var discoveredDevices: [UInt16] = []
     var assignedAddr: UInt16 = 0x0500 // updated from registration response
 
     // MARK: - CBOR encoder
@@ -192,11 +194,91 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return nil
         }
 
+        // Device Discovery response (ctrl=0x02, sub=0x02)
+        if ctrl == 0x02 && subType == 0x02 {
+            if let dict = decoded as? [(String, Any)] {
+                for (k, v) in dict {
+                    if k == "Devices" {
+                        if let devs = v as? [Any] {
+                            let ids = devs.compactMap { ($0 as? UInt64).map { UInt16($0) } }
+                            discoveredDevices = ids
+                            print("    [DEVICES] \(ids.map { String(format: "0x%04X", $0) })")
+                        }
+                    }
+                }
+            }
+            return nil
+        }
+
         // Subscribe response (MBP sub=0x82)
         if ctrl == 0x03 && subType == 0x82 {
             if let dict = decoded as? [(String, Any)] {
                 for (k, v) in dict {
                     if k == "tn" { print("    [SUB RESPONSE] topics: \(v)") }
+                }
+            }
+            return nil
+        }
+
+        // Parameter Discovery response (MBP sub=0x84)
+        if ctrl == 0x03 && subType == 0x84 {
+            if let dict = decoded as? [(String, Any)] {
+                for (k, v) in dict {
+                    if k == "topics", let topics = v as? [Any] {
+                        for topic in topics {
+                            if let t = topic as? [(String, Any)] {
+                                var topicName = ""
+                                for (tk, tv) in t {
+                                    if tk == "tn" { topicName = "\(tv)" }
+                                    if tk == "parameters", let plist = tv as? [Any] {
+                                        for p in plist {
+                                            if let pd = p as? [(String, Any)] {
+                                                var pn = "", tn2 = ""
+                                                var val: Any?, ptype: Any?, avail: Any?
+                                                var minV: Any?, maxV: Any?, perm: Any?
+                                                var enumList: Any?
+                                                for (pk, pv) in pd {
+                                                    switch pk {
+                                                    case "pn": pn = "\(pv)"
+                                                    case "tn": tn2 = "\(pv)"
+                                                    case "v": val = pv
+                                                    case "type": ptype = pv
+                                                    case "avail": avail = pv
+                                                    case "min": minV = pv
+                                                    case "max": maxV = pv
+                                                    case "perm": perm = pv
+                                                    case "enum": enumList = pv
+                                                    default: break
+                                                    }
+                                                }
+                                                let topic = tn2.isEmpty ? topicName : tn2
+                                                if !topic.isEmpty && !pn.isEmpty {
+                                                    let key = "\(topic).\(pn)"
+                                                    params[key] = val
+                                                    // Build schema info
+                                                    var schema = ""
+                                                    if let t = ptype { schema += "type=\(t) " }
+                                                    if let a = avail { schema += "avail=\(a) " }
+                                                    if let p = perm { schema += "perm=\(p) " }
+                                                    if let mi = minV { schema += "min=\(mi) " }
+                                                    if let ma = maxV { schema += "max=\(ma) " }
+                                                    if let e = enumList { schema += "enum=\(e) " }
+                                                    // Format value
+                                                    var valStr = "\(val ?? "nil")"
+                                                    if let v = val as? UInt64, (pn.contains("Temp") || pn.contains("Tgt")) {
+                                                        valStr = "\(v) (\(Double(v)/10.0)°C)"
+                                                    }
+                                                    print("    \(key) = \(valStr)  [\(schema.trimmingCharacters(in: .whitespaces))]")
+                                                    // Store schema
+                                                    paramSchemas[key] = schema.trimmingCharacters(in: .whitespaces)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             return nil
@@ -393,15 +475,18 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         Thread.sleep(forTimeInterval: 2)
         drainAndDecode()
 
-        // 7. Parameter Discovery to heater (0x0201) and panel (0x0101)
+        // 7. Parameter Discovery — query all discovered devices
         print("\n--- Parameter Discovery ---")
-        for devAddr: UInt16 in [0x0201, 0x0101] {
+        let targetDevices = discoveredDevices.isEmpty ? [UInt16(0x0201), 0x0101] : discoveredDevices
+        for devAddr in targetDevices {
+            // Skip self, broadcast, messageBroker
+            if devAddr == myAddr || devAddr == 0xFFFF || devAddr == 0x0000 || devAddr == 0x0500 { continue }
+            print("  Querying device 0x\(String(format:"%04X", devAddr))...")
             let pdFrame = v3Frame(dest: devAddr, src: myAddr, ctrl: 0x03, sub: 0x04, corr: 0, cbor: Data())
             let _ = sendTransport(pdFrame)
-            Thread.sleep(forTimeInterval: 1)
+            Thread.sleep(forTimeInterval: 3) // wait for multi-response
+            drainAndDecode()
         }
-        Thread.sleep(forTimeInterval: 3)
-        drainAndDecode()
 
         // 8. Listen for live data
         print("\n--- Listening 15s for live data ---")
@@ -478,16 +563,34 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             }
         }
 
-        // Show all other received parameters
-        let knownKeys = Set(sections.flatMap { $0.1 })
-        let otherKeys = params.keys.filter { !knownKeys.contains($0) }.sorted()
-        if !otherKeys.isEmpty {
-            print("\n  [OTHER PARAMETERS]")
-            for key in otherKeys {
-                print("    \(key) = \(params[key] ?? "nil")")
+        // Show ALL parameters grouped by topic
+        let allKeys = params.keys.filter { !$0.hasPrefix("_") }.sorted()
+        var topics: [String: [(String, Any, String)]] = [:]
+        for key in allKeys {
+            let parts = key.split(separator: ".", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let topic = String(parts[0])
+            let param = String(parts[1])
+            let val = params[key]!
+            let schema = paramSchemas[key] ?? ""
+            topics[topic, default: []].append((param, val, schema))
+        }
+
+        print("\n  [ALL DISCOVERED PARAMETERS]")
+        for topic in topics.keys.sorted() {
+            print("\n  \(topic):")
+            for (param, val, schema) in topics[topic]! {
+                var valStr = "\(val)"
+                if let v = val as? UInt64 {
+                    if param.contains("Temp") || param.contains("Tgt") {
+                        valStr = "\(Double(v)/10.0)°C"
+                    } else { valStr = "\(v)" }
+                }
+                let schemaStr = schema.isEmpty ? "" : "  [\(schema)]"
+                print("    \(param) = \(valStr)\(schemaStr)")
             }
         }
-        print(String(repeating: "=", count: 50))
+        print("\n" + String(repeating: "=", count: 50))
     }
 
     var lastPrintedIdx = 0
