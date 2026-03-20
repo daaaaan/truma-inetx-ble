@@ -26,6 +26,7 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     var params: [String: Any] = [:] // topic.param -> value
+    var assignedAddr: UInt16 = 0x0500 // updated from registration response
 
     // MARK: - CBOR encoder
     func cborMap(_ dict: [(String, Any)]) -> Data {
@@ -169,24 +170,54 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     func parseV3(_ data: Data) -> (String, String, Any?)? {
         guard data.count >= 18 else { return nil }
         let ctrl = data[6]
-        guard ctrl == 0x03 else { return nil } // MBP only
         let subType = data[16]
         let cbor = data[18...]
         guard let decoded = cborDecode(Data(cbor)) else { return nil }
 
-        // Extract tn/pn/v from decoded CBOR
-        if let dict = decoded as? [(String, Any)] {
-            var tn = "", pn = ""
-            var value: Any?
-            for (k, v) in dict {
-                if k == "tn" { tn = "\(v)" }
-                else if k == "pn" { pn = "\(v)" }
-                else if k == "v" { value = v }
+        // Registration response
+        if ctrl == 0x01 && subType == 0x02 {
+            if let dict = decoded as? [(String, Any)] {
+                for (k, v) in dict {
+                    if k == "addr" {
+                        if let a = v as? UInt64 {
+                            assignedAddr = UInt16(a)
+                            print("    [REG] Assigned addr: 0x\(String(format:"%04X", assignedAddr))")
+                        }
+                        params["_reg.addr"] = v
+                    }
+                    if k == "pv" { params["_reg.pv"] = v }
+                }
+                print("    [REG RESPONSE] \(dict)")
             }
-            if !tn.isEmpty && !pn.isEmpty {
-                return (tn, pn, value)
+            return nil
+        }
+
+        // Subscribe response (MBP sub=0x82)
+        if ctrl == 0x03 && subType == 0x82 {
+            if let dict = decoded as? [(String, Any)] {
+                for (k, v) in dict {
+                    if k == "tn" { print("    [SUB RESPONSE] topics: \(v)") }
+                }
+            }
+            return nil
+        }
+
+        // MBP INFO_MESSAGE (0x00) or WRITE response
+        if ctrl == 0x03 {
+            if let dict = decoded as? [(String, Any)] {
+                var tn = "", pn = ""
+                var value: Any?
+                for (k, v) in dict {
+                    if k == "tn" { tn = "\(v)" }
+                    else if k == "pn" { pn = "\(v)" }
+                    else if k == "v" { value = v }
+                }
+                if !tn.isEmpty && !pn.isEmpty {
+                    return (tn, pn, value)
+                }
             }
         }
+
         return nil
     }
 
@@ -268,21 +299,12 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return false
         }
         print("  RX: \(ack1.hex)")
-
-        // Step 5: Wait for message ack (0x83 XX 0x00)
-        guard let ack2 = waitNotify(timeout: 5) else {
-            print("  [timeout waiting for MsgAck]")
-            // Still OK — some messages don't get 0x83
-            return true
-        }
-        print("  RX: \(ack2.hex)")
-
-        // Step 6: Send confirm if we got 0x83
-        if ack2.count > 0 && ack2[0] == 0x83 {
-            print("  TX CMD: 0300  [confirm]")
-            let _ = writeCmd(Data([0x03, 0x00]))
+        if ack1.count >= 2 && ack1[0] == 0xF0 && ack1[1] != 0x01 {
+            print("  [DataAck status: 0x\(String(format:"%02X", ack1[1]))]")
         }
 
+        // Don't wait for 832300 MsgAck — it arrives async and auto-handler confirms it
+        Thread.sleep(forTimeInterval: 0.2)
         return true
     }
 
@@ -305,10 +327,12 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         let regCbor = cborMap([("pv", [5, 1] as Any)])
         let regFrame = v3Frame(dest: 0xFFFF, src: 0x0500, ctrl: 0x01, sub: 0x01, corr: 0x42, cbor: regCbor)
         let _ = sendTransport(regFrame)
-        Thread.sleep(forTimeInterval: 3) // wait for response + param discovery
+        Thread.sleep(forTimeInterval: 3) // wait for response
         drainAndDecode()
+        let myAddr = assignedAddr
+        print("  Using addr: 0x\(String(format:"%04X", myAddr))")
 
-        // 2. Subscribe — all topics in batches of 10 (per APK spec)
+        // 2. Subscribe — all topics in batches of 10 (per APK spec, 250ms delay)
         print("\n--- Subscribe (all topics) ---")
         let batches: [[String]] = [
             ["AirCirculation", "AirCooling", "AirHeating", "DeviceManagement",
@@ -326,10 +350,10 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             if batch.count < 24 { subCbor.append(0x80 | UInt8(batch.count)) }
             else { subCbor.append(0x98); subCbor.append(UInt8(batch.count)) }
             for t in batch { cborStr(t, &subCbor) }
-            let subFrame = v3Frame(dest: 0x0000, src: 0x0500, ctrl: 0x03, sub: 0x02, corr: 0, cbor: subCbor)
+            let subFrame = v3Frame(dest: 0x0000, src: myAddr, ctrl: 0x03, sub: 0x02, corr: 0, cbor: subCbor)
             print("  Batch \(i+1)/\(batches.count) (\(batch.count) topics)")
             let _ = sendTransport(subFrame)
-            Thread.sleep(forTimeInterval: 0.5) // 250ms+ delay between batches
+            Thread.sleep(forTimeInterval: 0.3)
         }
         Thread.sleep(forTimeInterval: 3)
         drainAndDecode()
@@ -338,32 +362,26 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         print("\n--- SystemTime ---")
         let ts = Int(Date().timeIntervalSince1970)
         let timeCbor = cborMap([("tn", "SystemTime" as Any), ("pn", "Time" as Any), ("v", ts as Any)])
-        let timeFrame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: timeCbor)
+        let timeFrame = v3Frame(dest: 0x0101, src: myAddr, ctrl: 0x03, sub: 0x01, corr: 0, cbor: timeCbor)
         let _ = sendTransport(timeFrame)
-        Thread.sleep(forTimeInterval: 0.5)
 
         let lotCbor = cborMap([("tn", "SystemTime" as Any), ("pn", "Lot" as Any), ("v", 0 as Any)])
-        let lotFrame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: lotCbor)
+        let lotFrame = v3Frame(dest: 0x0101, src: myAddr, ctrl: 0x03, sub: 0x01, corr: 0, cbor: lotCbor)
         let _ = sendTransport(lotFrame)
         Thread.sleep(forTimeInterval: 1)
 
         // 4. MobileIdentity
         print("\n--- MobileIdentity ---")
-        let idFields: [(String, String)] = [
-            ("UserName", "Vanlin Controller"),
-            ("Muid", "VANLIN-TEST-001"),
-            ("Uuid", "vanlin-test-uuid-001")
-        ]
-        for (param, value) in idFields {
+        for (param, value) in [("UserName", "Vanlin Controller"), ("Muid", "VANLIN-TEST-001"), ("Uuid", "vanlin-test-uuid-001")] {
             let cbor = cborMap([("tn", "MobileIdentity" as Any), ("pn", param as Any), ("v", value as Any)])
-            let frame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: cbor)
+            let frame = v3Frame(dest: 0x0101, src: myAddr, ctrl: 0x03, sub: 0x01, corr: 0, cbor: cbor)
             let _ = sendTransport(frame)
-            Thread.sleep(forTimeInterval: 0.3)
+            Thread.sleep(forTimeInterval: 0.2)
         }
 
         // 5. LastMessage marker
         let lastCbor = cborMap([("LastMessage", 1 as Any)])
-        let lastFrame = v3Frame(dest: 0x0500, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: lastCbor)
+        let lastFrame = v3Frame(dest: myAddr, src: myAddr, ctrl: 0x03, sub: 0x01, corr: 0, cbor: lastCbor)
         let _ = sendTransport(lastFrame)
         Thread.sleep(forTimeInterval: 2)
         drainAndDecode()
@@ -376,14 +394,12 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             if i < 5 { print("  ... \((i+1)*5)s ...") }
         }
 
-        // 7. Display collected parameters
         displayStatus()
 
-        // 8. Prompt: send a command?
-        print("\n--- Sending test command: Read AirHeating ---")
-        // Send INFO request (read) for AirHeating
+        // 7. Test command: read AirHeating
+        print("\n--- Test: Write AirHeating.TgtTemp ---")
         let readCbor = cborMap([("tn", "AirHeating" as Any), ("pn", "TgtTemp" as Any), ("v", 0 as Any)])
-        let readFrame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: readCbor)
+        let readFrame = v3Frame(dest: 0x0101, src: myAddr, ctrl: 0x03, sub: 0x01, corr: 0, cbor: readCbor)
         let _ = sendTransport(readFrame)
         Thread.sleep(forTimeInterval: 5)
         drainAndDecode()
@@ -573,9 +589,9 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             }
         }
 
-        // When we receive 0x83 (message ack from Truma), send 0x03 0x00 confirm
+        // Handle 0x83 MsgAck on CMD — always confirm with 0300
         if c.uuid == CHAR_CMD && data.count >= 2 && data[0] == 0x83 {
-            print("  -> MsgAck received, sending confirm 0300")
+            print("  -> MsgAck, sending confirm 0300")
             if let cmdChar = chars[CHAR_CMD] {
                 p.writeValue(Data([0x03, 0x00]), for: cmdChar, type: .withResponse)
             }
