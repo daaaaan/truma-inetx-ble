@@ -498,6 +498,41 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
         displayStatus()
 
+        // 9. SEND COMMAND: Water heating 70°C with diesel
+        print("\n" + String(repeating: "=", count: 50))
+        print("  SENDING COMMAND: Water Heating 70°C + Diesel")
+        print(String(repeating: "=", count: 50))
+
+        // Ensure diesel is on (send to heater 0x0201)
+        print("\n  Setting EnergySrc.DieselLevel = 1 (ON)...")
+        let dieselCbor = cborMap([("tn", "EnergySrc" as Any), ("pn", "DieselLevel" as Any), ("v", 1 as Any), ("id", 0 as Any)])
+        let dieselFrame = v3Frame(dest: 0x0201, src: myAddr, ctrl: 0x03, sub: 0x01, corr: 0, cbor: dieselCbor)
+        let _ = sendTransport(dieselFrame)
+        Thread.sleep(forTimeInterval: 1)
+
+        // Set water heating mode to 70°C (enum value 2)
+        print("  Setting WaterHeating.Mode = 2 (70°C)...")
+        let modeCbor = cborMap([("tn", "WaterHeating" as Any), ("pn", "Mode" as Any), ("v", 2 as Any), ("id", 0 as Any)])
+        let modeFrame = v3Frame(dest: 0x0201, src: myAddr, ctrl: 0x03, sub: 0x01, corr: 0, cbor: modeCbor)
+        let _ = sendTransport(modeFrame)
+        Thread.sleep(forTimeInterval: 1)
+
+        // Activate water heating
+        print("  Setting WaterHeating.Active = 1 (ACTIVE)...")
+        let activeCbor = cborMap([("tn", "WaterHeating" as Any), ("pn", "Active" as Any), ("v", 1 as Any), ("id", 0 as Any)])
+        let activeFrame = v3Frame(dest: 0x0201, src: myAddr, ctrl: 0x03, sub: 0x01, corr: 0, cbor: activeCbor)
+        let _ = sendTransport(activeFrame)
+        Thread.sleep(forTimeInterval: 1)
+        drainAndDecode()
+
+        // Listen for confirmation updates
+        print("\n--- Listening 15s for status updates ---")
+        for i in 0..<3 {
+            Thread.sleep(forTimeInterval: 5)
+            drainAndDecode()
+            if i < 2 { print("  ... \((i+1)*5)s ...") }
+        }
+
         displayStatus()
         finish()
     }
