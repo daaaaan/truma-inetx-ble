@@ -496,3 +496,92 @@ BluetoothDevice
 System
 Resources
 ```
+
+---
+
+## 15. Real Device Validation
+
+Findings from direct BLE communication with a physical Truma unit.
+
+### Device Identity
+
+| Field | Value |
+|-------|-------|
+| Model | Combi D 4 E GEN2 |
+| Serial | CBY04EU-F-36063191 |
+| Firmware | 2.3 |
+| SupID | 17943 |
+
+### Discovered Devices
+
+| Address (hex) | Type | Instance | Description |
+|---------------|------|----------|-------------|
+| 0x0101 | PANEL | #1 | iNet X Panel |
+| 0x0200 | TIN_MASTER | #0 | TIN bus master |
+| 0x0201 | TIN_MASTER | #1 | Combi D 4 E heater (sends temp data, receives commands) |
+| 0x032C | CAN_MASTER | #44 | CAN device |
+| 0x0400 | CI_BUS_MASTER | #0 | CI bus master |
+| 0x0500 | BLE_APP_SLAVE | #0 | Phone app slot 0 |
+| 0x0501 | BLE_APP_SLAVE | #1 | Phone app slot 1 (our assigned address) |
+| 0x0600 | BLE_MASTER | #0 | BLE master (panel BLE controller) |
+| 0x0601 | BLE_MASTER | #1 | BLE peripheral |
+| 0x0800 | CAN_SLAVE | #0 | CAN slave |
+| 0x0902 | VIRTUAL | #2 | Virtual device |
+| 0x0A01 | HMI | #1 | Panel display/UI |
+
+### Real Parameter Values
+
+Values confirmed from parameter discovery on a live device.
+
+| Topic | Parameter | Range / Enum |
+|-------|-----------|--------------|
+| RoomClimate | Mode | enum: Off=0, Heating=3, Ventilating=5 |
+| RoomClimate | TgtTemp | 16.0–30.0 °C (wire: 160–300) |
+| AirHeating | TgtTemp | 5.0–30.0 °C (wire: 50–300) |
+| AirHeating | Mode | enum: Fast=0, Comfort=1 |
+| AirHeating | Temp | current room temp, −40 to 60 °C |
+| AirCirculation | FanLevel | 0–10 |
+| WaterHeating | Mode | enum: 40°C=0, 60°C=1, 70°C=2 |
+| WaterHeating | Temp | −40 to 130 °C |
+| EnergySrc | DieselLevel | enum: Diesel off=0, Diesel on=1 |
+| EnergySrc | ElectricLevel | enum: Electric off=0, 900W=1, 1800W=2 |
+| Panel | Intst | brightness 10–100 |
+| Panel | DisplayTimeout | seconds |
+
+### New Topics Not in APK
+
+Discovered from real-device parameter discovery; not present in the decompiled APK.
+
+| Topic | Parameters | Notes |
+|-------|------------|-------|
+| Blemcu | BtDeviceName, BtPin, BleEnablePairing, BleStatus, BleConnState | BLE MCU status |
+| Eol | Vcc12, Vcc5 | End-of-line voltages (observed: Vcc12=12.361 V, Vcc5=5.069 V) |
+| ACCAirHeating | Mode | ACC mode (min=1, max=1) |
+| TimeAndDate | Date, Time | Panel date/time (string values) |
+
+### Critical Implementation Notes
+
+Lessons learned from live testing.
+
+**BLE / macOS**
+- CCCD must be force re-written (disable then enable) on macOS CoreBluetooth to receive notifications reliably.
+- macOS CLI tools require an app bundle with `NSBluetoothAlwaysUsageDescription` in `Info.plist`.
+- Do NOT subscribe to FC314004 (CMD_ALT) — doing so causes transport failure.
+
+**Transport / ACK flow**
+- Registration returns a dynamic `addr` field — use that value as the source address for all subsequent messages.
+- Auto-ACK every inbound DATA_R frame with opcode `f001`.
+- Auto-confirm every `83xx00` MsgAck with response `0300`.
+- MsgAck (`83xx00`) arrives asynchronously — do not block the send path waiting for it.
+- No explicit keepalive is needed — the constant ACK exchange keeps the connection alive.
+
+**Command routing**
+- Commands for `RoomClimate` must be sent to the panel (destination 0x0101).
+- Commands for `AirHeating` and `WaterHeating` must be sent to the heater (destination 0x0201).
+
+### Command Format (from capture)
+
+```
+CBOR payload:  {"tn": "RoomClimate", "pn": "Mode", "v": 3, "id": 0}
+V3 Frame:      dest=0x0101, src=<assigned_addr>, ctrl=0x03, sub=0x01, corr=0
+```
