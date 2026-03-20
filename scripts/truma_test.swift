@@ -25,7 +25,9 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         central = CBCentralManager(delegate: self, queue: bleQueue)
     }
 
-    // MARK: - CBOR helpers
+    var params: [String: Any] = [:] // topic.param -> value
+
+    // MARK: - CBOR encoder
     func cborMap(_ dict: [(String, Any)]) -> Data {
         var d = Data()
         d.append(0xA0 | UInt8(dict.count))
@@ -38,7 +40,8 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     func cborStr(_ s: String, _ d: inout Data) {
         let b = Array(s.utf8)
         if b.count < 24 { d.append(0x60 | UInt8(b.count)) }
-        else { d.append(0x78); d.append(UInt8(b.count)) }
+        else if b.count < 256 { d.append(0x78); d.append(UInt8(b.count)) }
+        else { d.append(0x79); d.append(UInt8(b.count >> 8)); d.append(UInt8(b.count & 0xFF)) }
         d.append(contentsOf: b)
     }
     func cborVal(_ v: Any, _ d: inout Data) {
@@ -56,6 +59,135 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             else { d.append(0x98); d.append(UInt8(a.count)) }
             for s in a { cborStr(s, &d) }
         }
+    }
+
+    // MARK: - CBOR decoder (minimal, handles Truma payloads)
+    func cborDecode(_ data: Data) -> Any? {
+        var offset = 0
+        return cborDecodeValue(data, &offset)
+    }
+
+    func cborDecodeValue(_ data: Data, _ offset: inout Int) -> Any? {
+        guard offset < data.count else { return nil }
+        let initial = data[offset]
+        let major = initial >> 5
+        let info = initial & 0x1F
+        offset += 1
+
+        switch major {
+        case 0: // unsigned int
+            return cborDecodeUInt(info, data, &offset)
+        case 1: // negative int
+            if let u = cborDecodeUInt(info, data, &offset) { return -(Int(u) + 1) }
+            return nil
+        case 2: // byte string
+            guard let len = cborDecodeUInt(info, data, &offset) else { return nil }
+            let end = offset + Int(len)
+            guard end <= data.count else { return nil }
+            let result = data[offset..<end]
+            offset = end
+            return result
+        case 3: // text string
+            if info == 31 { // indefinite
+                var s = ""
+                while offset < data.count && data[offset] != 0xFF {
+                    if let chunk = cborDecodeValue(data, &offset) as? String { s += chunk }
+                }
+                if offset < data.count { offset += 1 } // skip break
+                return s
+            }
+            guard let len = cborDecodeUInt(info, data, &offset) else { return nil }
+            let end = offset + Int(len)
+            guard end <= data.count else { return nil }
+            let s = String(data: data[offset..<end], encoding: .utf8) ?? ""
+            offset = end
+            return s
+        case 4: // array
+            if info == 31 { // indefinite
+                var arr: [Any] = []
+                while offset < data.count && data[offset] != 0xFF {
+                    if let v = cborDecodeValue(data, &offset) { arr.append(v) }
+                }
+                if offset < data.count { offset += 1 }
+                return arr
+            }
+            guard let len = cborDecodeUInt(info, data, &offset) else { return nil }
+            var arr: [Any] = []
+            for _ in 0..<Int(len) {
+                if let v = cborDecodeValue(data, &offset) { arr.append(v) }
+            }
+            return arr
+        case 5: // map
+            if info == 31 { // indefinite map
+                var dict: [(String, Any)] = []
+                while offset < data.count && data[offset] != 0xFF {
+                    let key = cborDecodeValue(data, &offset)
+                    let val = cborDecodeValue(data, &offset)
+                    if let k = key as? String, let v = val { dict.append((k, v)) }
+                }
+                if offset < data.count { offset += 1 }
+                return dict
+            }
+            guard let len = cborDecodeUInt(info, data, &offset) else { return nil }
+            var dict: [(String, Any)] = []
+            for _ in 0..<Int(len) {
+                let key = cborDecodeValue(data, &offset)
+                let val = cborDecodeValue(data, &offset)
+                if let k = key as? String, let v = val { dict.append((k, v)) }
+            }
+            return dict
+        case 7: // simple/float
+            if info == 20 { return false }
+            if info == 21 { return true }
+            if info == 22 { return "null" }
+            if info == 31 { return "break" } // break
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    func cborDecodeUInt(_ info: UInt8, _ data: Data, _ offset: inout Int) -> UInt64? {
+        if info < 24 { return UInt64(info) }
+        if info == 24 {
+            guard offset < data.count else { return nil }
+            let v = UInt64(data[offset]); offset += 1; return v
+        }
+        if info == 25 {
+            guard offset + 2 <= data.count else { return nil }
+            let v = UInt64(data[offset]) << 8 | UInt64(data[offset+1]); offset += 2; return v
+        }
+        if info == 26 {
+            guard offset + 4 <= data.count else { return nil }
+            let v = UInt64(data[offset]) << 24 | UInt64(data[offset+1]) << 16 |
+                    UInt64(data[offset+2]) << 8 | UInt64(data[offset+3]); offset += 4; return v
+        }
+        return nil
+    }
+
+    // MARK: - Parse V3 frame and extract parameters
+    func parseV3(_ data: Data) -> (String, String, Any?)? {
+        guard data.count >= 18 else { return nil }
+        let ctrl = data[6]
+        guard ctrl == 0x03 else { return nil } // MBP only
+        let subType = data[16]
+        let cbor = data[18...]
+        guard let decoded = cborDecode(Data(cbor)) else { return nil }
+
+        // Extract tn/pn/v from decoded CBOR
+        if let dict = decoded as? [(String, Any)] {
+            var tn = "", pn = ""
+            var value: Any?
+            for (k, v) in dict {
+                if k == "tn" { tn = "\(v)" }
+                else if k == "pn" { pn = "\(v)" }
+                else if k == "v" { value = v }
+            }
+            if !tn.isEmpty && !pn.isEmpty {
+                return (tn, pn, value)
+            }
+        }
+        return nil
     }
 
     // MARK: - V3 Frame
@@ -166,97 +298,174 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         _runTransportTests()
     }
 
-    func _runDirectTests() {
-        // Write V3 frames directly to DATA_WRITE without CMD handshake
-        print("--- Direct: Registration ---")
-        let regCbor = cborMap([("pv", [5, 1] as Any)])
-        let regFrame = v3Frame(dest: 0xFFFF, src: 0x0500, ctrl: 0x01, sub: 0x01, corr: 0x42, cbor: regCbor)
-        print("  TX DATA_W (\(regFrame.count)b): \(regFrame.hex)")
-        writeData(regFrame)
-        Thread.sleep(forTimeInterval: 2)
-        printNewNotifications("Registration")
-
-        print("\n--- Direct: Subscribe ---")
-        let topics: [String] = ["AirHeating", "WaterHeating", "RoomClimate",
-                                 "EnergySrc", "Temperature", "PowerSupply"]
-        var subCbor = Data()
-        subCbor.append(0xA1)
-        cborStr("tn", &subCbor)
-        subCbor.append(0x86)
-        for t in topics { cborStr(t, &subCbor) }
-        let subFrame = v3Frame(dest: 0x0000, src: 0x0500, ctrl: 0x03, sub: 0x02, corr: 0, cbor: subCbor)
-        print("  TX DATA_W (\(subFrame.count)b)")
-        writeData(subFrame)
-        Thread.sleep(forTimeInterval: 2)
-        printNewNotifications("Subscribe")
-
-        print("\n--- Direct: SystemTime ---")
-        let ts = Int(Date().timeIntervalSince1970)
-        let timeCbor = cborMap([("tn", "SystemTime" as Any), ("pn", "Time" as Any), ("v", ts as Any)])
-        let timeFrame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: timeCbor)
-        writeData(timeFrame)
-
-        let nameCbor = cborMap([("tn", "MobileIdentity" as Any), ("pn", "UserName" as Any), ("v", "Vanlin" as Any)])
-        let nameFrame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: nameCbor)
-        writeData(nameFrame)
-
-        let lastCbor = cborMap([("LastMessage", 1 as Any)])
-        let lastFrame = v3Frame(dest: 0x0500, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: lastCbor)
-        writeData(lastFrame)
-        Thread.sleep(forTimeInterval: 2)
-        printNewNotifications("Init sequence")
-
-        // Listen for data
-        print("\n--- Listening 20s for updates ---")
-        Thread.sleep(forTimeInterval: 20)
-        printNewNotifications("Listen")
-        finish()
-    }
 
     func _runTransportTests() {
-        print("\n--- Transport: Registration ---")
+        // 1. Registration
+        print("\n--- Registration ---")
         let regCbor = cborMap([("pv", [5, 1] as Any)])
         let regFrame = v3Frame(dest: 0xFFFF, src: 0x0500, ctrl: 0x01, sub: 0x01, corr: 0x42, cbor: regCbor)
         let _ = sendTransport(regFrame)
-        Thread.sleep(forTimeInterval: 2)
-        printNewNotifications("Registration")
+        Thread.sleep(forTimeInterval: 3) // wait for response + param discovery
+        drainAndDecode()
 
-        print("\n--- Transport: Subscribe ---")
-        let topics: [String] = ["AirHeating", "WaterHeating", "RoomClimate",
-                                 "EnergySrc", "Temperature", "PowerSupply"]
-        var subCbor = Data()
-        subCbor.append(0xA1)
-        cborStr("tn", &subCbor)
-        subCbor.append(0x86)
-        for t in topics { cborStr(t, &subCbor) }
-        let subFrame = v3Frame(dest: 0x0000, src: 0x0500, ctrl: 0x03, sub: 0x02, corr: 0, cbor: subCbor)
-        let _ = sendTransport(subFrame)
-        Thread.sleep(forTimeInterval: 2)
-        printNewNotifications("Subscribe")
+        // 2. Subscribe — all topics in batches of 10 (per APK spec)
+        print("\n--- Subscribe (all topics) ---")
+        let batches: [[String]] = [
+            ["AirCirculation", "AirCooling", "AirHeating", "DeviceManagement",
+             "EnergySrc", "ErrorReset", "FreshWater", "GasBtl", "GasControl", "GreyWater"],
+            ["Identify", "L1Bat", "L2Bat", "LinePower", "MobileIdentity",
+             "PowerSupply", "RoomClimate", "Switches", "Temperature", "Transfer"],
+            ["VBat", "WaterHeating", "AmbientLight", "Panel", "BatteryMngmt",
+             "Install", "Connect", "TimerConfig", "BleDeviceManagement", "BluetoothDevice"],
+            ["System", "Resources", "PowerMgmt"]
+        ]
+        for (i, batch) in batches.enumerated() {
+            var subCbor = Data()
+            subCbor.append(0xA1)
+            cborStr("tn", &subCbor)
+            if batch.count < 24 { subCbor.append(0x80 | UInt8(batch.count)) }
+            else { subCbor.append(0x98); subCbor.append(UInt8(batch.count)) }
+            for t in batch { cborStr(t, &subCbor) }
+            let subFrame = v3Frame(dest: 0x0000, src: 0x0500, ctrl: 0x03, sub: 0x02, corr: 0, cbor: subCbor)
+            print("  Batch \(i+1)/\(batches.count) (\(batch.count) topics)")
+            let _ = sendTransport(subFrame)
+            Thread.sleep(forTimeInterval: 0.5) // 250ms+ delay between batches
+        }
+        Thread.sleep(forTimeInterval: 3)
+        drainAndDecode()
 
-        print("\n--- Listening 15s ---")
-        Thread.sleep(forTimeInterval: 15)
-        printNewNotifications("Listen")
+        // 3. SystemTime
+        print("\n--- SystemTime ---")
+        let ts = Int(Date().timeIntervalSince1970)
+        let timeCbor = cborMap([("tn", "SystemTime" as Any), ("pn", "Time" as Any), ("v", ts as Any)])
+        let timeFrame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: timeCbor)
+        let _ = sendTransport(timeFrame)
+        Thread.sleep(forTimeInterval: 0.5)
+
+        let lotCbor = cborMap([("tn", "SystemTime" as Any), ("pn", "Lot" as Any), ("v", 0 as Any)])
+        let lotFrame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: lotCbor)
+        let _ = sendTransport(lotFrame)
+        Thread.sleep(forTimeInterval: 1)
+
+        // 4. MobileIdentity
+        print("\n--- MobileIdentity ---")
+        let idFields: [(String, String)] = [
+            ("UserName", "Vanlin Controller"),
+            ("Muid", "VANLIN-TEST-001"),
+            ("Uuid", "vanlin-test-uuid-001")
+        ]
+        for (param, value) in idFields {
+            let cbor = cborMap([("tn", "MobileIdentity" as Any), ("pn", param as Any), ("v", value as Any)])
+            let frame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: cbor)
+            let _ = sendTransport(frame)
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+
+        // 5. LastMessage marker
+        let lastCbor = cborMap([("LastMessage", 1 as Any)])
+        let lastFrame = v3Frame(dest: 0x0500, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: lastCbor)
+        let _ = sendTransport(lastFrame)
+        Thread.sleep(forTimeInterval: 2)
+        drainAndDecode()
+
+        // 6. Listen for live data
+        print("\n--- Listening 30s for live data ---")
+        for i in 0..<6 {
+            Thread.sleep(forTimeInterval: 5)
+            drainAndDecode()
+            if i < 5 { print("  ... \((i+1)*5)s ...") }
+        }
+
+        // 7. Display collected parameters
+        displayStatus()
+
+        // 8. Prompt: send a command?
+        print("\n--- Sending test command: Read AirHeating ---")
+        // Send INFO request (read) for AirHeating
+        let readCbor = cborMap([("tn", "AirHeating" as Any), ("pn", "TgtTemp" as Any), ("v", 0 as Any)])
+        let readFrame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: readCbor)
+        let _ = sendTransport(readFrame)
+        Thread.sleep(forTimeInterval: 5)
+        drainAndDecode()
+
+        displayStatus()
         finish()
     }
 
-    var lastPrintedIdx = 0
-    func printNewNotifications(_ label: String) {
-        let newData = Array(rxData[lastPrintedIdx...])
-        print("  [\(label)] \(newData.count) new notifications:")
-        for (i, d) in newData.enumerated() {
-            if d.count > 16 {
-                let dest = UInt16(d[0]) | (UInt16(d[1]) << 8)
-                let src = UInt16(d[2]) | (UInt16(d[3]) << 8)
-                let ctrl = d[6]
-                print("    V3: dst=0x\(String(format:"%04X",dest)) src=0x\(String(format:"%04X",src)) ctrl=0x\(String(format:"%02X",ctrl)) (\(d.count)b)")
-                print("       \(d.prefix(40).hex)...")
-            } else {
-                print("    (\(d.count)b): \(d.hex)")
+    func drainAndDecode() {
+        // Process all unprocessed V3 frames
+        while lastPrintedIdx < rxData.count {
+            let d = rxData[lastPrintedIdx]
+            lastPrintedIdx += 1
+            guard d.count > 18 else { continue }
+
+            if let (tn, pn, val) = parseV3(d) {
+                let key = "\(tn).\(pn)"
+                params[key] = val
+                // Format value for display
+                var valStr = "\(val ?? "nil")"
+                if let v = val as? UInt64 {
+                    // Temperature check
+                    if pn.contains("Temp") || pn.contains("Tgt") {
+                        valStr = "\(v) (\(Double(v)/10.0)°C)"
+                    } else {
+                        valStr = "\(v)"
+                    }
+                }
+                print("    \(key) = \(valStr)")
             }
         }
-        lastPrintedIdx = rxData.count
     }
+
+    func displayStatus() {
+        print("\n" + String(repeating: "=", count: 50))
+        print("  TRUMA HEATER STATUS")
+        print(String(repeating: "=", count: 50))
+
+        let sections: [(String, [String])] = [
+            ("ROOM CLIMATE", ["RoomClimate.Active", "RoomClimate.Mode", "RoomClimate.TgtTemp"]),
+            ("AIR HEATING", ["AirHeating.Active", "AirHeating.Temp", "AirHeating.TgtTemp",
+                             "AirHeating.Mode", "AirHeating.FanLevel"]),
+            ("WATER HEATING", ["WaterHeating.Active", "WaterHeating.Mode", "WaterHeating.Temp"]),
+            ("ENERGY", ["EnergySrc.GasLevel", "EnergySrc.ElectricLevel", "EnergySrc.DieselLevel"]),
+            ("POWER", ["PowerSupply.DPlus", "PowerSupply.MainSwitch"]),
+        ]
+
+        let modeNames: [Int: String] = [0: "OFF", 1: "ACC", 2: "COOLING", 3: "HEATING",
+                                          4: "HEATING_AC", 5: "VENTING", 6: "DEHUMIDIFYING"]
+        let activeNames: [Int: String] = [0: "OFF", 1: "ACTIVE", 2: "IDLE"]
+
+        for (section, keys) in sections {
+            print("\n  [\(section)]")
+            for key in keys {
+                if let val = params[key] {
+                    var display = "\(val)"
+                    let intVal = (val as? UInt64).map { Int($0) } ?? (val as? Int)
+                    if key.hasSuffix(".Mode"), let iv = intVal { display = modeNames[iv] ?? "\(iv)" }
+                    if key.hasSuffix(".Active"), let iv = intVal { display = activeNames[iv] ?? "\(iv)" }
+                    if key.contains("Temp"), let iv = intVal { display = "\(Double(iv)/10.0)°C" }
+                    let shortKey = key.components(separatedBy: ".").last ?? key
+                    print("    \(shortKey): \(display)")
+                } else {
+                    let shortKey = key.components(separatedBy: ".").last ?? key
+                    print("    \(shortKey): --")
+                }
+            }
+        }
+
+        // Show all other received parameters
+        let knownKeys = Set(sections.flatMap { $0.1 })
+        let otherKeys = params.keys.filter { !knownKeys.contains($0) }.sorted()
+        if !otherKeys.isEmpty {
+            print("\n  [OTHER PARAMETERS]")
+            for key in otherKeys {
+                print("    \(key) = \(params[key] ?? "nil")")
+            }
+        }
+        print(String(repeating: "=", count: 50))
+    }
+
+    var lastPrintedIdx = 0
 
     func finish() {
         print("\n  Total notifications: \(rxData.count)")
