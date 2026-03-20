@@ -76,6 +76,7 @@ class TrumaMqtt:
         client.subscribe("truma/water/active/set")
         client.subscribe("truma/energy/diesel/set")
         client.subscribe("truma/energy/electric/set")
+        client.subscribe("truma/fan/level/set")
 
     def _on_message(self, client, userdata, msg):
         """Handle commands from HA."""
@@ -105,7 +106,10 @@ class TrumaMqtt:
             elif topic == "truma/energy/diesel/set":
                 self._command_sender("EnergySrc", "DieselLevel", int(payload))
             elif topic == "truma/energy/electric/set":
-                self._command_sender("EnergySrc", "ElectricLevel", int(payload))
+                elec_map = {"Off": 0, "900W": 1, "1800W": 2, "0": 0, "1": 1, "2": 2}
+                self._command_sender("EnergySrc", "ElectricLevel", elec_map.get(payload, 0))
+            elif topic == "truma/fan/level/set":
+                self._command_sender("AirCirculation", "FanLevel", int(float(payload)))
         except Exception as e:
             log.error("MQTT command error: %s", e)
 
@@ -156,6 +160,41 @@ class TrumaMqtt:
                 "device": DEVICE_INFO,
                 "icon": icon,
             })
+
+        # Energy source controls
+        self._publish_config("switch", "diesel", {
+            "name": "Diesel Heating",
+            "unique_id": "truma_diesel",
+            "command_topic": "truma/energy/diesel/set",
+            "state_topic": "truma/energy/diesel/state",
+            "payload_on": "1", "payload_off": "0",
+            "state_on": "1", "state_off": "0",
+            "availability_topic": "truma/status",
+            "device": DEVICE_INFO,
+            "icon": "mdi:fuel",
+        })
+        self._publish_config("select", "electric_level", {
+            "name": "Electric Heating",
+            "unique_id": "truma_electric_level",
+            "command_topic": "truma/energy/electric/set",
+            "state_topic": "truma/energy/electric/state",
+            "options": ["Off", "900W", "1800W"],
+            "availability_topic": "truma/status",
+            "device": DEVICE_INFO,
+            "icon": "mdi:lightning-bolt",
+        })
+
+        # Fan level
+        self._publish_config("number", "fan_level", {
+            "name": "Fan Level",
+            "unique_id": "truma_fan_level",
+            "command_topic": "truma/fan/level/set",
+            "state_topic": "truma/fan/level/state",
+            "min": 0, "max": 10, "step": 1,
+            "availability_topic": "truma/status",
+            "device": DEVICE_INFO,
+            "icon": "mdi:fan",
+        })
 
         # Binary sensors
         self._publish_config("binary_sensor", "flame", {
@@ -226,6 +265,17 @@ class TrumaMqtt:
                 pub("truma/water/mode/state", "off", retain=True)
             else:
                 pub("truma/water/mode/state", mode_map.get(mode, "off"), retain=True)
+
+        # Energy
+        en = status.get("energy")
+        if en:
+            pub("truma/energy/diesel/state", str(en.get("diesel", 0)), retain=True)
+            elec_map = {0: "Off", 1: "900W", 2: "1800W"}
+            pub("truma/energy/electric/state", elec_map.get(en.get("electric", 0), "Off"), retain=True)
+
+        # Fan level (from air_heating)
+        if ah and ah.get("fan_level") is not None:
+            pub("truma/fan/level/state", str(ah["fan_level"]), retain=True)
 
         # System
         sys_data = status.get("system")
