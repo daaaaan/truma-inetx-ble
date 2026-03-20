@@ -5,6 +5,666 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any, Callable, Optional
 
 
+WEB_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Truma Control</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700&display=swap');
+
+  :root {
+    --bg:        #0f1014;
+    --surface:   #181b22;
+    --border:    #272c38;
+    --amber:     #e8a030;
+    --amber-dim: #7a5218;
+    --blue:      #4a9eca;
+    --green:     #3dba6f;
+    --red:       #e05050;
+    --muted:     #5a6070;
+    --text:      #c8cdd8;
+    --text-hi:   #eceef2;
+    --mono:      'Share Tech Mono', monospace;
+    --ui:        'Barlow Condensed', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--ui);
+    font-size: 15px;
+    min-height: 100vh;
+    padding: 16px;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 0 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 20px;
+  }
+
+  .logo {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-hi);
+  }
+
+  .logo span { color: var(--amber); }
+
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background 0.4s, box-shadow 0.4s;
+  }
+
+  .status-dot.connected {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+  }
+
+  .status-dot.disconnected {
+    background: var(--red);
+    box-shadow: 0 0 6px var(--red);
+  }
+
+  /* ── Grid ── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 14px;
+  }
+
+  /* ── Card ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 20px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--border);
+    transition: background 0.4s;
+  }
+
+  .card.active::before { background: var(--amber); }
+  .card.active-blue::before { background: var(--blue); }
+  .card.active-green::before { background: var(--green); }
+
+  .card-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+
+  /* ── Temp readout ── */
+  .temp-row {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    margin-bottom: 14px;
+  }
+
+  .temp-block { display: flex; flex-direction: column; }
+
+  .temp-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 2px;
+  }
+
+  .temp-value {
+    font-family: var(--mono);
+    font-size: 44px;
+    line-height: 1;
+    color: var(--amber);
+    transition: color 0.4s;
+  }
+
+  .temp-value.dim { color: var(--amber-dim); }
+  .temp-value.blue { color: var(--blue); }
+
+  .temp-unit {
+    font-family: var(--mono);
+    font-size: 18px;
+    color: var(--muted);
+    align-self: flex-end;
+    margin-bottom: 5px;
+  }
+
+  .temp-target {
+    font-family: var(--mono);
+    font-size: 22px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+
+  .target-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  /* ── Mode badge ── */
+  .mode-badge {
+    display: inline-block;
+    padding: 3px 9px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    background: #22262f;
+    color: var(--muted);
+    margin-bottom: 14px;
+    transition: background 0.3s, color 0.3s;
+  }
+
+  .mode-badge.on {
+    background: rgba(232, 160, 48, 0.15);
+    color: var(--amber);
+  }
+
+  .mode-badge.on-blue {
+    background: rgba(74, 158, 202, 0.15);
+    color: var(--blue);
+  }
+
+  /* ── Button group ── */
+  .btn-group {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    flex: 1;
+    min-width: 60px;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #22262f;
+    color: var(--muted);
+    font-family: var(--ui);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: border-color 0.2s, color 0.2s, background 0.2s, box-shadow 0.2s;
+  }
+
+  .btn:hover {
+    border-color: var(--amber);
+    color: var(--amber);
+    background: rgba(232, 160, 48, 0.08);
+  }
+
+  .btn.active {
+    border-color: var(--amber);
+    color: var(--amber);
+    background: rgba(232, 160, 48, 0.12);
+    box-shadow: 0 0 0 1px var(--amber-dim);
+  }
+
+  .btn.active-blue {
+    border-color: var(--blue);
+    color: var(--blue);
+    background: rgba(74, 158, 202, 0.12);
+    box-shadow: 0 0 0 1px rgba(74, 158, 202, 0.4);
+  }
+
+  .btn:active { transform: scale(0.97); }
+
+  /* ── Energy toggles ── */
+  .energy-row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 0;
+  }
+
+  .toggle-card {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #22262f;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+  }
+
+  .toggle-card:hover { border-color: var(--amber); }
+
+  .toggle-card.on {
+    border-color: var(--amber);
+    background: rgba(232, 160, 48, 0.1);
+  }
+
+  .toggle-icon {
+    font-size: 22px;
+    line-height: 1;
+  }
+
+  .toggle-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .toggle-state {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    transition: color 0.3s;
+  }
+
+  .toggle-card.on .toggle-state { color: var(--amber); }
+
+  /* ── System info ── */
+  .sys-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .sys-item { display: flex; flex-direction: column; gap: 3px; }
+
+  .sys-item-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .sys-item-value {
+    font-family: var(--mono);
+    font-size: 20px;
+    color: var(--text-hi);
+  }
+
+  .sys-item-value.flame-on { color: var(--amber); }
+  .sys-item-value.flame-off { color: var(--muted); }
+
+  /* ── Error banner ── */
+  .error-banner {
+    display: none;
+    padding: 10px 14px;
+    background: rgba(224, 80, 80, 0.12);
+    border: 1px solid var(--red);
+    border-radius: 4px;
+    color: var(--red);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    margin-bottom: 14px;
+  }
+
+  .error-banner.visible { display: block; }
+
+  /* ── Footer ── */
+  footer {
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  #last-update { font-family: var(--mono); font-size: 11px; }
+
+  /* ── Responsive ── */
+  @media (max-width: 500px) {
+    .temp-value { font-size: 36px; }
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Truma <span>Control</span></div>
+  <div class="status-pill">
+    <div class="status-dot" id="conn-dot"></div>
+    <span id="conn-label">Connecting</span>
+  </div>
+</header>
+
+<div class="error-banner" id="error-banner"></div>
+
+<div class="grid">
+
+  <!-- Room Climate -->
+  <div class="card" id="card-room">
+    <div class="card-label">Room Climate</div>
+    <div class="temp-row">
+      <div class="temp-block">
+        <div class="temp-label">Current</div>
+        <div class="temp-value" id="room-current">--</div>
+      </div>
+      <div class="temp-unit">°C</div>
+      <div class="temp-block">
+        <div class="temp-label">Target</div>
+        <div class="temp-target" id="room-target">--°</div>
+      </div>
+    </div>
+    <div class="mode-badge" id="room-mode-badge">OFF</div>
+    <div class="btn-group">
+      <button class="btn" id="btn-room-off"
+        onclick="sendCommand('RoomClimate','Mode',0)">Off</button>
+      <button class="btn" id="btn-room-heat"
+        onclick="sendCommand('RoomClimate','Mode',1)">Heat</button>
+      <button class="btn" id="btn-room-vent"
+        onclick="sendCommand('RoomClimate','Mode',2)">Vent</button>
+      <button class="btn" id="btn-room-auto"
+        onclick="sendCommand('RoomClimate','Mode',3)">Auto</button>
+    </div>
+  </div>
+
+  <!-- Water Heating -->
+  <div class="card" id="card-water">
+    <div class="card-label">Water Heating</div>
+    <div class="temp-row">
+      <div class="temp-block">
+        <div class="temp-label">Current</div>
+        <div class="temp-value blue" id="water-current">--</div>
+      </div>
+      <div class="temp-unit">°C</div>
+    </div>
+    <div class="mode-badge" id="water-mode-badge">OFF</div>
+    <div class="btn-group">
+      <button class="btn" id="btn-water-off"
+        onclick="sendCommand('WaterHeating','Mode',0)">Off</button>
+      <button class="btn" id="btn-water-40"
+        onclick="sendCommand('WaterHeating','Mode',1)">40°</button>
+      <button class="btn" id="btn-water-60"
+        onclick="sendCommand('WaterHeating','Mode',2)">60°</button>
+      <button class="btn" id="btn-water-70"
+        onclick="sendCommand('WaterHeating','Mode',3)">70°</button>
+    </div>
+  </div>
+
+  <!-- Energy Source -->
+  <div class="card" id="card-energy">
+    <div class="card-label">Energy Source</div>
+    <div class="energy-row">
+      <div class="toggle-card" id="toggle-diesel"
+           onclick="toggleDiesel()">
+        <div class="toggle-icon">&#128293;</div>
+        <div class="toggle-label">Diesel</div>
+        <div class="toggle-state" id="diesel-state">--</div>
+      </div>
+      <div class="toggle-card" id="toggle-electric"
+           onclick="toggleElectric()">
+        <div class="toggle-icon">&#9889;</div>
+        <div class="toggle-label">Electric</div>
+        <div class="toggle-state" id="electric-state">--</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- System -->
+  <div class="card" id="card-system">
+    <div class="card-label">System</div>
+    <div class="sys-grid">
+      <div class="sys-item">
+        <div class="sys-item-label">Flame</div>
+        <div class="sys-item-value" id="sys-flame">--</div>
+      </div>
+      <div class="sys-item">
+        <div class="sys-item-label">Voltage</div>
+        <div class="sys-item-value" id="sys-voltage">--</div>
+      </div>
+      <div class="sys-item">
+        <div class="sys-item-label">Int. Temp</div>
+        <div class="sys-item-value" id="sys-int-temp">--</div>
+      </div>
+      <div class="sys-item">
+        <div class="sys-item-label">Errors</div>
+        <div class="sys-item-value" id="sys-errors">--</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  <span>Truma LIN Bridge</span>
+  <span id="last-update">--</span>
+</footer>
+
+<script>
+  // ── State cache (for toggle logic) ──
+  var _state = null;
+
+  // ── Helpers ──
+  function fmt(v, decimals) {
+    if (v === null || v === undefined) return '--';
+    return parseFloat(v).toFixed(decimals !== undefined ? decimals : 1);
+  }
+
+  function setActive(card, isActive, colorClass) {
+    card.classList.remove('active', 'active-blue', 'active-green');
+    if (isActive) card.classList.add(colorClass || 'active');
+  }
+
+  function setBadge(el, text, isOn, colorClass) {
+    el.textContent = text;
+    el.classList.remove('on', 'on-blue');
+    if (isOn) el.classList.add(colorClass || 'on');
+  }
+
+  function clearBtns(prefix) {
+    ['off','heat','vent','auto','40','60','70'].forEach(function(s) {
+      var b = document.getElementById('btn-' + prefix + '-' + s);
+      if (b) { b.classList.remove('active', 'active-blue'); }
+    });
+  }
+
+  // ── Room Climate ──
+  var ROOM_MODE_NAMES = { 0: 'OFF', 1: 'HEAT', 2: 'VENT', 3: 'AUTO' };
+  var ROOM_BTN_IDS    = { 0: 'off', 1: 'heat', 2: 'vent', 3: 'auto' };
+
+  function updateRoom(rc) {
+    document.getElementById('room-current').textContent = fmt(rc.current_temp_c);
+    document.getElementById('room-target').textContent  =
+      rc.target_temp_c !== null && rc.target_temp_c !== undefined
+        ? fmt(rc.target_temp_c, 0) + '°' : '--°';
+
+    var mode = rc.mode !== undefined ? rc.mode : 0;
+    var name = ROOM_MODE_NAMES[mode] || rc.mode_name || 'OFF';
+    var isOn = mode !== 0;
+    setBadge(document.getElementById('room-mode-badge'), name, isOn);
+    setActive(document.getElementById('card-room'), isOn);
+
+    clearBtns('room');
+    var btnId = 'btn-room-' + (ROOM_BTN_IDS[mode] || 'off');
+    var btn = document.getElementById(btnId);
+    if (btn) btn.classList.add('active');
+  }
+
+  // ── Water Heating ──
+  // mode_name mapping from protocol: OFF=0, TEMP_40=1, TEMP_60=2, TEMP_70=3
+  var WATER_MODE_LABELS = { 0: 'OFF', 1: '40 °C', 2: '60 °C', 3: '70 °C' };
+  var WATER_BTN_IDS     = { 0: 'off', 1: '40',    2: '60',    3: '70'    };
+
+  function updateWater(wh) {
+    document.getElementById('water-current').textContent = fmt(wh.current_temp_c);
+    var mode = wh.mode !== undefined ? wh.mode : 0;
+    var label = WATER_MODE_LABELS[mode] || wh.mode_name || 'OFF';
+    var isOn = mode !== 0;
+    setBadge(document.getElementById('water-mode-badge'), label, isOn, 'on-blue');
+    setActive(document.getElementById('card-water'), isOn, 'active-blue');
+
+    clearBtns('water');
+    var btnId = 'btn-water-' + (WATER_BTN_IDS[mode] || 'off');
+    var btn = document.getElementById(btnId);
+    if (btn) btn.classList.add('active-blue');
+  }
+
+  // ── Energy ──
+  function updateEnergy(en) {
+    var dieselOn   = en.diesel   === 1;
+    var electricOn = en.electric === 1;
+
+    var td = document.getElementById('toggle-diesel');
+    var te = document.getElementById('toggle-electric');
+    td.classList.toggle('on', dieselOn);
+    te.classList.toggle('on', electricOn);
+    document.getElementById('diesel-state').textContent   = dieselOn   ? 'ON' : 'OFF';
+    document.getElementById('electric-state').textContent = electricOn ? 'ON' : 'OFF';
+  }
+
+  // ── System ──
+  function updateSystem(sys) {
+    var flameEl = document.getElementById('sys-flame');
+    var on = sys.flame_status === 1;
+    flameEl.textContent = on ? 'ON' : 'OFF';
+    flameEl.className = 'sys-item-value ' + (on ? 'flame-on' : 'flame-off');
+
+    document.getElementById('sys-voltage').textContent =
+      sys.voltage_v !== null && sys.voltage_v !== undefined
+        ? fmt(sys.voltage_v, 1) + ' V' : '--';
+
+    document.getElementById('sys-int-temp').textContent =
+      fmt(sys.internal_temp_c) + ' °C';
+
+    document.getElementById('sys-errors').textContent =
+      sys.error_codes ? String(sys.error_codes) : 'None';
+  }
+
+  // ── Connection ──
+  function updateConn(connected) {
+    var dot   = document.getElementById('conn-dot');
+    var label = document.getElementById('conn-label');
+    dot.className = 'status-dot ' + (connected ? 'connected' : 'disconnected');
+    label.textContent = connected ? 'Connected' : 'Disconnected';
+  }
+
+  // ── Time ──
+  function updateTime(ts) {
+    if (!ts) return;
+    var d = new Date(ts * 1000);
+    var hh = String(d.getHours()).padStart(2,'0');
+    var mm = String(d.getMinutes()).padStart(2,'0');
+    var ss = String(d.getSeconds()).padStart(2,'0');
+    document.getElementById('last-update').textContent =
+      'Updated ' + hh + ':' + mm + ':' + ss;
+  }
+
+  // ── Main status poll ──
+  function poll() {
+    fetch('/api/status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        _state = data;
+        document.getElementById('error-banner').classList.remove('visible');
+
+        updateConn(data.connected);
+        if (data.room_climate)  updateRoom(data.room_climate);
+        if (data.water_heating) updateWater(data.water_heating);
+        if (data.energy)        updateEnergy(data.energy);
+        if (data.system)        updateSystem(data.system);
+        updateTime(data.last_update);
+      })
+      .catch(function(err) {
+        updateConn(false);
+        var eb = document.getElementById('error-banner');
+        eb.textContent = 'Cannot reach API: ' + err.message;
+        eb.classList.add('visible');
+      });
+  }
+
+  // ── Commands ──
+  function sendCommand(topic, param, value) {
+    fetch('/api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic: topic, param: param, value: value })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        var eb = document.getElementById('error-banner');
+        eb.textContent = 'Command failed: ' + data.error;
+        eb.classList.add('visible');
+      }
+      setTimeout(poll, 400);
+    })
+    .catch(function(err) {
+      var eb = document.getElementById('error-banner');
+      eb.textContent = 'Command error: ' + err.message;
+      eb.classList.add('visible');
+    });
+  }
+
+  function toggleDiesel() {
+    if (!_state || !_state.energy) return;
+    var current = _state.energy.diesel === 1 ? 1 : 0;
+    sendCommand('Energy', 'Diesel', current === 1 ? 0 : 1);
+  }
+
+  function toggleElectric() {
+    if (!_state || !_state.energy) return;
+    var current = _state.energy.electric === 1 ? 1 : 0;
+    sendCommand('Energy', 'Electric', current === 1 ? 0 : 1);
+  }
+
+  // ── Boot ──
+  poll();
+  setInterval(poll, 3000);
+</script>
+</body>
+</html>"""
+
+
 class TrumaRequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler for Truma REST API."""
 
@@ -14,7 +674,9 @@ class TrumaRequestHandler(BaseHTTPRequestHandler):
     health_getter = None     # callable() -> dict
 
     def do_GET(self):
-        if self.path == "/api/status":
+        if self.path in ("/", "/index.html"):
+            self._html_response(WEB_PAGE)
+        elif self.path == "/api/status":
             self._json_response(self.state_getter())
         elif self.path.startswith("/api/status/"):
             section = self.path.split("/")[-1]
@@ -27,6 +689,14 @@ class TrumaRequestHandler(BaseHTTPRequestHandler):
             self._json_response(self.health_getter())
         else:
             self._json_response({"error": "not found"}, 404)
+
+    def _html_response(self, html: str, status: int = 200):
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
         if self.path == "/api/command":

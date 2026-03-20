@@ -4,7 +4,7 @@ import os
 import logging
 
 # Add velib_python to path
-sys.path.insert(0, '/opt/victronenergy/dbus-systemcalc-data/ext/velib_python/')
+sys.path.insert(0, '/opt/victronenergy/dbus-tempsensor-relay/ext/velib_python')
 
 try:
     from vedbus import VeDbusService
