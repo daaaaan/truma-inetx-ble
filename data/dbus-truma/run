@@ -1,0 +1,12 @@
+#!/bin/sh
+# Truma BLE service for Venus OS
+# Stop conflicting BLE services
+svc -d /service/dbus-ble-sensors 2>/dev/null
+svc -d /service/vesmart-server 2>/dev/null
+# Disable broken onboard Bluetooth
+hciconfig hci0 down 2>/dev/null
+# Wait for BLE adapter
+sleep 3
+# Run the service
+exec 2>&1
+exec python3 -m service.main
