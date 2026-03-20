@@ -9,6 +9,7 @@ let CHAR_CMD_ALT  = CBUUID(string: "FC314004-F3B2-11E8-8EB2-F2801F1B9FD1")
 
 class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     let bleQueue = DispatchQueue(label: "ble", qos: .userInitiated)
+    let testQueue = DispatchQueue(label: "test", qos: .userInitiated)
     var central: CBCentralManager!
     var peripheral: CBPeripheral?
     var chars: [CBUUID: CBCharacteristic] = [:]
@@ -72,22 +73,34 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         return f
     }
 
-    // MARK: - Write helpers (called ON bleQueue)
+    // MARK: - Write helpers
+    // Writes dispatch to bleQueue, waits happen on testQueue
     func writeCmd(_ data: Data) -> Error? {
         guard let c = chars[CHAR_CMD] else { return NSError(domain: "BLE", code: -1) }
         writeError = nil
-        peripheral?.writeValue(data, for: c, type: .withResponse)
-        let _ = writeSem.wait(timeout: .now() + 3.0)
+        writeSem = DispatchSemaphore(value: 0)
+        bleQueue.async {
+            self.peripheral?.writeValue(data, for: c, type: .withResponse)
+        }
+        let _ = writeSem.wait(timeout: .now() + 5.0)
         return writeError
     }
 
     func writeData(_ data: Data) {
         guard let c = chars[CHAR_DATA_W] else { return }
-        peripheral?.writeValue(data, for: c, type: .withoutResponse)
+        bleQueue.async {
+            self.peripheral?.writeValue(data, for: c, type: .withoutResponse)
+        }
+        Thread.sleep(forTimeInterval: 0.05) // brief settle
     }
 
-    func waitNotify(timeout: TimeInterval = 3.0) -> Data? {
-        let _ = notifySem.wait(timeout: .now() + timeout)
+    func waitNotify(timeout: TimeInterval = 5.0) -> Data? {
+        notifySem = DispatchSemaphore(value: 0)
+        let result = notifySem.wait(timeout: .now() + timeout)
+        if result == .timedOut {
+            print("  [timeout waiting for notify]")
+            return nil
+        }
         return rxData.last
     }
 
@@ -124,89 +137,128 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         return true
     }
 
-    // MARK: - Run tests
+    // MARK: - Run tests (on testQueue, NOT bleQueue)
     func runTests() {
+        testQueue.async { self._runTests() }
+    }
+
+    func _runTests() {
         print("\n" + String(repeating: "=", count: 50))
         print("  TRUMA PROTOCOL TEST")
         print(String(repeating: "=", count: 50))
 
-        // First: test raw CMD write
-        print("\n--- PRE-TEST: Raw CMD write ---")
-        let testWrite = Data([0x01, 0x05, 0x00])
-        if let err = writeCmd(testWrite) {
-            print("  CMD write FAILED: \(err.localizedDescription)")
-            print("  ATT error code: \((err as NSError).code)")
+        // Strategy A: Try transport protocol first
+        print("\n--- A: Transport write test ---")
+        let testData = Data([0x01, 0x05, 0x00])
+        if let err = writeCmd(testData) {
+            print("  CMD write failed (code \((err as NSError).code))")
+            print("  Falling back to DIRECT DATA writes (no transport)")
+            print("")
+            _runDirectTests()
+            return
+        }
+        print("  CMD write OK! Using transport protocol.")
+        // Abort the test transport (send 0 bytes)
+        Thread.sleep(forTimeInterval: 1)
+        _runTransportTests()
 
-            // Try reading CMD to check encryption
-            print("\n  Testing read on CMD char...")
-            if let c = chars[CHAR_CMD] {
-                peripheral?.readValue(for: c)
-                Thread.sleep(forTimeInterval: 2)
-            }
+    }
 
-            print("\n  Skipping transport, trying direct DATA write...")
-            let regCbor = cborMap([("pv", [5, 1] as Any)])
-            let frame = v3Frame(dest: 0xFFFF, src: 0x0500, ctrl: 0x01, sub: 0x01, corr: 0x42, cbor: regCbor)
-            writeData(frame)
-            print("  Sent registration directly to DATA_W (no transport)")
+    func _runDirectTests() {
+        // Write V3 frames directly to DATA_WRITE without CMD handshake
+        print("--- Direct: Registration ---")
+        let regCbor = cborMap([("pv", [5, 1] as Any)])
+        let regFrame = v3Frame(dest: 0xFFFF, src: 0x0500, ctrl: 0x01, sub: 0x01, corr: 0x42, cbor: regCbor)
+        print("  TX DATA_W (\(regFrame.count)b): \(regFrame.hex)")
+        writeData(regFrame)
+        Thread.sleep(forTimeInterval: 2)
+        printNewNotifications("Registration")
 
-            // Listen for any response
-            print("  Listening 10s for responses...")
-            Thread.sleep(forTimeInterval: 10)
+        print("\n--- Direct: Subscribe ---")
+        let topics: [String] = ["AirHeating", "WaterHeating", "RoomClimate",
+                                 "EnergySrc", "Temperature", "PowerSupply"]
+        var subCbor = Data()
+        subCbor.append(0xA1)
+        cborStr("tn", &subCbor)
+        subCbor.append(0x86)
+        for t in topics { cborStr(t, &subCbor) }
+        let subFrame = v3Frame(dest: 0x0000, src: 0x0500, ctrl: 0x03, sub: 0x02, corr: 0, cbor: subCbor)
+        print("  TX DATA_W (\(subFrame.count)b)")
+        writeData(subFrame)
+        Thread.sleep(forTimeInterval: 2)
+        printNewNotifications("Subscribe")
 
-            print("\n  Received \(rxData.count) notifications:")
-            for (i, d) in rxData.enumerated() {
-                print("    [\(i)] (\(d.count)b): \(d.hex)")
-            }
-        } else {
-            print("  CMD write OK!")
+        print("\n--- Direct: SystemTime ---")
+        let ts = Int(Date().timeIntervalSince1970)
+        let timeCbor = cborMap([("tn", "SystemTime" as Any), ("pn", "Time" as Any), ("v", ts as Any)])
+        let timeFrame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: timeCbor)
+        writeData(timeFrame)
 
-            // Wait for response
-            if let ack = waitNotify() {
-                print("  Response: \(ack.hex)")
-            }
+        let nameCbor = cborMap([("tn", "MobileIdentity" as Any), ("pn", "UserName" as Any), ("v", "Vanlin" as Any)])
+        let nameFrame = v3Frame(dest: 0x0101, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: nameCbor)
+        writeData(nameFrame)
 
-            // Full test: Registration
-            print("\n--- TEST: Registration ---")
-            let regCbor = cborMap([("pv", [5, 1] as Any)])
-            let frame = v3Frame(dest: 0xFFFF, src: 0x0500, ctrl: 0x01, sub: 0x01, corr: 0x42, cbor: regCbor)
-            if sendTransport(frame) {
-                print("  Registration sent!")
-                Thread.sleep(forTimeInterval: 2)
-            }
+        let lastCbor = cborMap([("LastMessage", 1 as Any)])
+        let lastFrame = v3Frame(dest: 0x0500, src: 0x0500, ctrl: 0x03, sub: 0x01, corr: 0, cbor: lastCbor)
+        writeData(lastFrame)
+        Thread.sleep(forTimeInterval: 2)
+        printNewNotifications("Init sequence")
 
-            // Subscribe
-            print("\n--- TEST: Subscribe ---")
-            let topics: [String] = ["AirHeating", "WaterHeating", "RoomClimate",
-                                     "EnergySrc", "Temperature", "PowerSupply"]
-            var subCbor = Data()
-            subCbor.append(0xA1)
-            cborStr("tn", &subCbor)
-            subCbor.append(0x86) // array(6)
-            for t in topics { cborStr(t, &subCbor) }
-            let subFrame = v3Frame(dest: 0x0000, src: 0x0500, ctrl: 0x03, sub: 0x02, corr: 0, cbor: subCbor)
-            if sendTransport(subFrame) {
-                print("  Subscribed!")
-            }
+        // Listen for data
+        print("\n--- Listening 20s for updates ---")
+        Thread.sleep(forTimeInterval: 20)
+        printNewNotifications("Listen")
+        finish()
+    }
 
-            // Listen
-            print("\n--- Listening 15s ---")
-            Thread.sleep(forTimeInterval: 15)
+    func _runTransportTests() {
+        print("\n--- Transport: Registration ---")
+        let regCbor = cborMap([("pv", [5, 1] as Any)])
+        let regFrame = v3Frame(dest: 0xFFFF, src: 0x0500, ctrl: 0x01, sub: 0x01, corr: 0x42, cbor: regCbor)
+        let _ = sendTransport(regFrame)
+        Thread.sleep(forTimeInterval: 2)
+        printNewNotifications("Registration")
 
-            print("\n  Received \(rxData.count) total notifications")
-            for (i, d) in rxData.enumerated() {
-                if d.count > 16 {
-                    let dest = UInt16(d[0]) | (UInt16(d[1]) << 8)
-                    let src = UInt16(d[2]) | (UInt16(d[3]) << 8)
-                    let ctrl = d[6]
-                    print("    [\(i)] V3: dst=0x\(String(format:"%04X",dest)) src=0x\(String(format:"%04X",src)) ctrl=0x\(String(format:"%02X",ctrl)) (\(d.count)b)")
-                } else {
-                    print("    [\(i)] (\(d.count)b): \(d.hex)")
-                }
+        print("\n--- Transport: Subscribe ---")
+        let topics: [String] = ["AirHeating", "WaterHeating", "RoomClimate",
+                                 "EnergySrc", "Temperature", "PowerSupply"]
+        var subCbor = Data()
+        subCbor.append(0xA1)
+        cborStr("tn", &subCbor)
+        subCbor.append(0x86)
+        for t in topics { cborStr(t, &subCbor) }
+        let subFrame = v3Frame(dest: 0x0000, src: 0x0500, ctrl: 0x03, sub: 0x02, corr: 0, cbor: subCbor)
+        let _ = sendTransport(subFrame)
+        Thread.sleep(forTimeInterval: 2)
+        printNewNotifications("Subscribe")
+
+        print("\n--- Listening 15s ---")
+        Thread.sleep(forTimeInterval: 15)
+        printNewNotifications("Listen")
+        finish()
+    }
+
+    var lastPrintedIdx = 0
+    func printNewNotifications(_ label: String) {
+        let newData = Array(rxData[lastPrintedIdx...])
+        print("  [\(label)] \(newData.count) new notifications:")
+        for (i, d) in newData.enumerated() {
+            if d.count > 16 {
+                let dest = UInt16(d[0]) | (UInt16(d[1]) << 8)
+                let src = UInt16(d[2]) | (UInt16(d[3]) << 8)
+                let ctrl = d[6]
+                print("    V3: dst=0x\(String(format:"%04X",dest)) src=0x\(String(format:"%04X",src)) ctrl=0x\(String(format:"%02X",ctrl)) (\(d.count)b)")
+                print("       \(d.prefix(40).hex)...")
+            } else {
+                print("    (\(d.count)b): \(d.hex)")
             }
         }
+        lastPrintedIdx = rxData.count
+    }
 
-        print("\nDone!")
+    func finish() {
+        print("\n  Total notifications: \(rxData.count)")
+        print("Done!")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { exit(0) }
     }
 
@@ -267,8 +319,13 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             if c.properties.contains(.writeWithoutResponse) { props += "W" }
             if c.properties.contains(.notify) { props += "n" }
             print("    \(c.uuid) [\(props)]")
-            if c.properties.contains(.notify) {
-                p.setNotifyValue(true, for: c)
+            // Only subscribe to CMD and DATA_R — NOT CMD_ALT (per capture analysis)
+            if c.properties.contains(.notify) && c.uuid != CHAR_CMD_ALT {
+                // Force re-write CCCD: disable then enable to ensure it reaches the device
+                p.setNotifyValue(false, for: c)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    p.setNotifyValue(true, for: c)
+                }
             }
         }
     }
@@ -282,11 +339,11 @@ class TrumaTest: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         print("  Notify ON: \(c.uuid) (\(notifyCount)/3)")
 
         // Start tests once CMD + DATA_R + CMD_ALT notifications are all active
-        if notifyCount >= 3 && !testStarted {
+        if notifyCount >= 2 && !testStarted {
             testStarted = true
             print("\n  All notifications active. Starting tests in 3s...")
-            bleQueue.asyncAfter(deadline: .now() + 3) {
-                self.runTests()
+            testQueue.asyncAfter(deadline: .now() + 3) {
+                self._runTests()
             }
         }
     }
