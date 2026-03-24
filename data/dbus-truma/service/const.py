@@ -31,7 +31,7 @@ TRANSPORT_ACK = 0xF0
 TRANSPORT_MSG_ACK = 0x83
 TRANSPORT_CONFIRM = 0x03
 
-# Topic subscription batches (10 per batch, per APK spec)
+# Topic subscription batches (10 per batch, per protocol spec)
 TOPIC_BATCHES = [
     ["AirCirculation", "AirCooling", "AirHeating", "DeviceManagement",
      "EnergySrc", "ErrorReset", "FreshWater", "GasBtl", "GasControl", "GreyWater"],

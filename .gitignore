@@ -4,3 +4,44 @@ __pycache__/
 *.pyc
 .pytest_cache/
 logs/*.log
+
+# Packet captures
+*.pklg
+
+# BLE logs
+ble_bridge.log
+ble_sniffer.log
+
+# APK decompilation
+apk/
+
+# Identity files (contain pairing secrets)
+.truma_identity.json
+scripts/.truma_identity.json
+
+# macOS app bundles
+scripts/TrumaTest.app/
+
+# Compiled binaries
+scripts/truma_test
+
+# uv lock
+uv.lock
+
+# OMC state
+.omc/
+
+# LIN bus code (not part of BLE integration)
+src/lin/
+src/truma/
+tools/
+tests/
+src/mqtt/
+progress.md
+docs/plans/
+docs/protocol.md
+scripts/monitor_setpoint.py
+scripts/decode_truma.py
+scripts/parse_pklg.py
+scripts/ble_sniffer.py
+scripts/truma_test.swift

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Test Truma BLE protocol against APK reverse-engineering findings.
+"""Test Truma BLE protocol against documented findings.
 
 Connects to Truma iNetX via dbus-fast and logs raw byte-level
-data to validate the protocol stack discovered from the APK.
+data to validate the protocol stack.
 """
 
 import asyncio
@@ -16,25 +16,25 @@ from dbus_fast import BusType, Variant  # noqa
 
 IDENTITY_FILE = Path(__file__).parent / ".truma_identity.json"
 
-# APK-confirmed UUIDs
+# protocol-confirmed UUIDs
 DATA_SERVICE = "f47bbbac-f3b2-11e8-8eb2-f2801f1b9fd1"
 CHAR_CMD     = "fc314001-f3b2-11e8-8eb2-f2801f1b9fd1"  # CMD R/W (transport control)
 CHAR_DATA_W  = "fc314002-f3b2-11e8-8eb2-f2801f1b9fd1"  # DATA write
 CHAR_DATA_R  = "fc314003-f3b2-11e8-8eb2-f2801f1b9fd1"  # DATA read (notify)
 CHAR_CMD_ALT = "fc314004-f3b2-11e8-8eb2-f2801f1b9fd1"  # CMD alt (notify)
 
-# APK-confirmed device addresses
+# protocol-confirmed device addresses
 DEV_MSG_BROKER = 0x0000
 DEV_PANEL      = 0x0101
 DEV_APP        = 0x0500
 DEV_BROADCAST  = 0xFFFF
 
-# APK-confirmed control types
+# protocol-confirmed control types
 CTRL_REGISTRATION = 0x01
 CTRL_DISCOVERY    = 0x02
 CTRL_MBP          = 0x03
 
-# APK-confirmed MBP types
+# protocol-confirmed MBP types
 MBP_INFO       = 0x00
 MBP_WRITE      = 0x01
 MBP_SUBSCRIBE  = 0x02
@@ -59,7 +59,7 @@ def load_identity():
 
 
 def build_v3_frame(dest, src, control_type, mbp_type, correlation_id, cbor_payload):
-    """Build a proper TruMessageV3 frame per APK spec.
+    """Build a proper TruMessageV3 frame per protocol spec.
 
     Layout:
     [0-1]  dest device ID (UShort LE)
@@ -361,7 +361,7 @@ class ProtocolTester:
     # === TEST STEPS ===
 
     async def test_registration(self):
-        """Test: Send proper V3 registration request per APK spec."""
+        """Test: Send proper V3 registration request per protocol spec."""
         print("\n" + "=" * 60)
         print("TEST 1: Registration (DEVICE_REGISTRATION 0x01)")
         print("=" * 60)
@@ -386,7 +386,7 @@ class ProtocolTester:
         print(f"\n  Received {len(self._notifications)} notifications so far")
 
     async def test_subscribe(self):
-        """Test: Subscribe to topics per APK spec."""
+        """Test: Subscribe to topics per protocol spec."""
         print("\n" + "=" * 60)
         print("TEST 2: Topic Subscription (MBP SUBSCRIBE 0x02)")
         print("=" * 60)
@@ -413,13 +413,13 @@ class ProtocolTester:
             )
             print(f"  Batch {i+1}: {len(batch)} topics")
             await self._send_transport(frame)
-            await asyncio.sleep(0.25)  # APK uses 250ms
+            await asyncio.sleep(0.25)  # protocol uses 250ms
 
         await asyncio.sleep(2)
         print(f"\n  Total notifications: {len(self._notifications)}")
 
     async def test_identity(self):
-        """Test: Send MobileIdentity + SystemTime per APK spec."""
+        """Test: Send MobileIdentity + SystemTime per protocol spec."""
         print("\n" + "=" * 60)
         print("TEST 3: Identity + SystemTime (MBP WRITE 0x01)")
         print("=" * 60)
@@ -501,7 +501,7 @@ class ProtocolTester:
         await self.connect()
         print("\n" + "#" * 60)
         print("  TRUMA PROTOCOL VERIFICATION TEST")
-        print("  Testing APK findings against real device")
+        print("  Testing protocol findings against real device")
         print("#" * 60)
 
         await self.test_registration()

@@ -63,6 +63,7 @@ class BleTransport:
         self._transport_event = None
         self._transport_ack = None
         self._data_callbacks = []  # list of callbacks for decoded V3 frames
+        self._send_lock = asyncio.Lock()
         self.assigned_addr = DEV_APP_DEFAULT
         self.identity = None
         self._connected = False
@@ -167,6 +168,11 @@ class BleTransport:
           5. Brief pause (0.2s) for async MsgAck
         Returns True if DataAck received.
         """
+        async with self._send_lock:
+            return await self._send_locked(packet)
+
+    async def _send_locked(self, packet: bytes) -> bool:
+        """Send packet (must be called under _send_lock)."""
         success = False
         try:
             # Step 1: InitDataTransfer

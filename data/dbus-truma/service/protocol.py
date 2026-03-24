@@ -15,7 +15,7 @@ from .const import (
 
 
 def build_v3_frame(dest, src, ctrl, sub_type, corr_id, cbor_payload):
-    """Build a TruMessageV3 frame per APK spec.
+    """Build a TruMessageV3 frame per protocol spec.
 
     Layout:
     [0-1]  dest device ID (UShort LE)

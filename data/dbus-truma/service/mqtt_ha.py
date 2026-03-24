@@ -99,8 +99,10 @@ class TrumaMqtt:
                 if value == -1:
                     self._command_sender("WaterHeating", "Active", 0)
                 else:
-                    self._command_sender("WaterHeating", "Mode", value)
+                    # Activate first, then set mode — Truma rejects mode
+                    # changes when water heating is inactive
                     self._command_sender("WaterHeating", "Active", 1)
+                    self._command_sender("WaterHeating", "Mode", value)
             elif topic == "truma/water/active/set":
                 self._command_sender("WaterHeating", "Active", int(payload))
             elif topic == "truma/energy/diesel/set":

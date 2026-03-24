@@ -421,13 +421,13 @@ WEB_PAGE = """<!DOCTYPE html>
     <div class="mode-badge" id="water-mode-badge">OFF</div>
     <div class="btn-group">
       <button class="btn" id="btn-water-off"
-        onclick="sendCommand('WaterHeating','Mode',0)">Off</button>
+        onclick="sendCommand('WaterHeating','Active',0)">Off</button>
       <button class="btn" id="btn-water-40"
-        onclick="sendCommand('WaterHeating','Mode',1)">40°</button>
+        onclick="waterOn(0)">40°</button>
       <button class="btn" id="btn-water-60"
-        onclick="sendCommand('WaterHeating','Mode',2)">60°</button>
+        onclick="waterOn(1)">60°</button>
       <button class="btn" id="btn-water-70"
-        onclick="sendCommand('WaterHeating','Mode',3)">70°</button>
+        onclick="waterOn(2)">70°</button>
     </div>
   </div>
 
@@ -643,6 +643,12 @@ WEB_PAGE = """<!DOCTYPE html>
       eb.textContent = 'Command error: ' + err.message;
       eb.classList.add('visible');
     });
+  }
+
+  function waterOn(mode) {
+    // Activate first, then set mode — Truma rejects mode changes when inactive
+    sendCommand('WaterHeating', 'Active', 1);
+    setTimeout(function() { sendCommand('WaterHeating', 'Mode', mode); }, 500);
   }
 
   function toggleDiesel() {

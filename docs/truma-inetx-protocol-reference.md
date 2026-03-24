@@ -1,5 +1,5 @@
 # Truma iNet X BLE Protocol Reference
-## Reverse-Engineered from Android APK v3.2.0
+## Documented from BLE traffic analysis and interoperability testing
 
 ---
 
@@ -548,9 +548,9 @@ Values confirmed from parameter discovery on a live device.
 | Panel | Intst | brightness 10–100 |
 | Panel | DisplayTimeout | seconds |
 
-### New Topics Not in APK
+### Additional Topics
 
-Discovered from real-device parameter discovery; not present in the decompiled APK.
+Discovered from real-device parameter discovery; not documented elsewhere.
 
 | Topic | Parameters | Notes |
 |-------|------------|-------|

@@ -1,7 +1,7 @@
 [project]
 name = "vanlin"
 version = "0.1.0"
-description = "Truma InetX LIN bus sniffer and Home Assistant integration"
+description = "Truma iNetX BLE controller for Cerbo GX with Home Assistant integration"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
