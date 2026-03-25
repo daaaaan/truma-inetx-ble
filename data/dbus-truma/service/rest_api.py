@@ -759,6 +759,21 @@ SETUP_PAGE = """<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Service Stats -->
+<div class="card">
+  <div class="card-label">Service</div>
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px">
+    <div><label>Uptime</label><div class="status" id="stat-uptime">--</div></div>
+    <div><label>Params</label><div class="status" id="stat-params">--</div></div>
+    <div><label>Address</label><div class="status" id="stat-addr">--</div></div>
+    <div><label>Last Update</label><div class="status" id="stat-update">--</div></div>
+  </div>
+  <div class="row">
+    <button class="btn danger" onclick="restartService()">Restart Service</button>
+    <span class="status" id="restart-status"></span>
+  </div>
+</div>
+
 <!-- BLE Pairing -->
 <div class="card">
   <div class="card-label">BLE Pairing</div>
@@ -826,12 +841,30 @@ function logMsg(msg) {
   el.scrollTop = el.scrollHeight;
 }
 
+function fmtUptime(s) {
+  if (!s) return '--';
+  var d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+  if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm ' + Math.floor(s%60) + 's';
+}
+
+function fmtTime(ts) {
+  if (!ts) return '--';
+  var d = new Date(ts * 1000);
+  return d.toLocaleTimeString();
+}
+
 // -- Status --
 function loadStatus() {
   api('GET', '/api/health').then(function(d) {
     var el = document.getElementById('ble-status');
     if (d.connected) { el.textContent = 'Connected (' + d.assigned_addr + ')'; el.className = 'status ok'; }
     else { el.textContent = 'Disconnected'; el.className = 'status err'; }
+    document.getElementById('stat-uptime').textContent = fmtUptime(d.uptime);
+    document.getElementById('stat-params').textContent = d.raw_param_count || 0;
+    document.getElementById('stat-addr').textContent = d.assigned_addr || '--';
+    document.getElementById('stat-update').textContent = fmtTime(d.last_update);
   }).catch(function() {
     document.getElementById('ble-status').textContent = 'API unreachable';
     document.getElementById('ble-status').className = 'status err';
@@ -972,7 +1005,23 @@ function resetIdentity() {
   });
 }
 
+// -- Restart --
+function restartService() {
+  if (!confirm('Restart the Truma service? It will reconnect automatically.')) return;
+  var el = document.getElementById('restart-status');
+  el.textContent = 'Restarting...'; el.className = 'status info';
+  logMsg('Restarting service...');
+  api('POST', '/api/setup/restart').then(function(d) {
+    el.textContent = d.message || 'Restarting'; el.className = 'status ok';
+    logMsg('Service restart initiated. Refreshing in 12s...');
+    setTimeout(function() { location.reload(); }, 12000);
+  }).catch(function(e) {
+    el.textContent = 'Error: ' + e.message; el.className = 'status err';
+  });
+}
+
 loadStatus();
+setInterval(loadStatus, 5000);
 </script>
 </body>
 </html>"""

@@ -296,6 +296,12 @@ class TrumaService:
             elif action == "config":
                 self._config = config.update(data)
                 return self._config
+            elif action == "restart":
+                import os, signal as sig
+                logger.info("Restart requested via setup UI")
+                # Send SIGTERM to ourselves — daemontools will restart us
+                os.kill(os.getpid(), sig.SIGTERM)
+                return {"ok": True, "message": "Service restarting..."}
             else:
                 return {"error": "unknown endpoint"}
 
