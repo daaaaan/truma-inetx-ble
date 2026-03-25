@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 import threading
@@ -671,6 +672,312 @@ WEB_PAGE = """<!DOCTYPE html>
 </html>"""
 
 
+SETUP_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Truma Setup</title>
+<style>
+  :root {
+    --bg: #0f1014; --surface: #181b22; --border: #272c38;
+    --amber: #e8a030; --blue: #4a9eca; --green: #3dba6f; --red: #e05050;
+    --muted: #5a6070; --text: #c8cdd8; --text-hi: #eceef2;
+    --mono: monospace; --ui: system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--ui);
+         font-size: 15px; min-height: 100vh; padding: 16px; max-width: 600px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between;
+           padding: 12px 0 20px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+  .logo { font-size: 22px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-hi); }
+  .logo span { color: var(--amber); }
+  a.back { color: var(--muted); text-decoration: none; font-size: 13px; }
+  a.back:hover { color: var(--amber); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+          padding: 18px 20px; margin-bottom: 14px; }
+  .card-label { font-size: 11px; font-weight: 700; letter-spacing: 0.14em;
+                text-transform: uppercase; color: var(--muted); margin-bottom: 14px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .row:last-child { margin-bottom: 0; }
+  label { font-size: 13px; color: var(--muted); min-width: 80px; font-weight: 600; }
+  input[type=text], input[type=number] {
+    flex: 1; background: #22262f; border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px 10px; color: var(--text-hi); font-family: var(--mono); font-size: 14px; }
+  input:focus { outline: none; border-color: var(--amber); }
+  .btn { padding: 9px 16px; border: 1px solid var(--border); border-radius: 4px;
+         background: #22262f; color: var(--muted); font-family: var(--ui); font-size: 13px;
+         font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; }
+  .btn:hover { border-color: var(--amber); color: var(--amber); background: rgba(232,160,48,0.08); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn.primary { border-color: var(--amber); color: var(--amber); }
+  .btn.danger { border-color: var(--red); color: var(--red); }
+  .btn.danger:hover { background: rgba(224,80,80,0.1); }
+  .status { font-family: var(--mono); font-size: 13px; padding: 8px 0; }
+  .status.ok { color: var(--green); }
+  .status.err { color: var(--red); }
+  .status.info { color: var(--blue); }
+  .device-list { list-style: none; }
+  .device-list li { display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 6px;
+    background: #22262f; }
+  .device-name { color: var(--text-hi); font-weight: 600; }
+  .device-addr { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 10px;
+           font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; margin-left: 8px; }
+  .badge.paired { background: rgba(61,186,111,0.15); color: var(--green); }
+  .badge.connected { background: rgba(74,158,202,0.15); color: var(--blue); }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border);
+             border-top-color: var(--amber); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #log { background: #0a0b0e; border: 1px solid var(--border); border-radius: 4px; padding: 10px;
+         font-family: var(--mono); font-size: 12px; max-height: 200px; overflow-y: auto;
+         white-space: pre-wrap; color: var(--muted); margin-top: 10px; display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Truma <span>Setup</span></div>
+  <a class="back" href="/">&#8592; Control Panel</a>
+</header>
+
+<!-- Connection Status -->
+<div class="card">
+  <div class="card-label">Connection Status</div>
+  <div class="row">
+    <label>BLE</label>
+    <span class="status" id="ble-status">Checking...</span>
+  </div>
+  <div class="row">
+    <label>MQTT</label>
+    <span class="status" id="mqtt-status">Checking...</span>
+  </div>
+  <div class="row">
+    <label>Identity</label>
+    <span class="status" id="identity-status">Checking...</span>
+  </div>
+</div>
+
+<!-- BLE Pairing -->
+<div class="card">
+  <div class="card-label">BLE Pairing</div>
+  <div class="row">
+    <button class="btn" id="btn-scan" onclick="bleScan()">Scan for Truma</button>
+    <span id="scan-spinner" style="display:none"><span class="spinner"></span> Scanning...</span>
+  </div>
+  <ul class="device-list" id="device-list"></ul>
+  <div class="row" id="pair-row" style="display:none">
+    <label>Passkey</label>
+    <input type="number" id="passkey" placeholder="6-digit code from panel" maxlength="6">
+    <button class="btn primary" onclick="blePair()">Pair</button>
+  </div>
+  <div class="status" id="pair-status"></div>
+</div>
+
+<!-- MQTT Configuration -->
+<div class="card">
+  <div class="card-label">MQTT Broker</div>
+  <div class="row">
+    <label>Host</label>
+    <input type="text" id="mqtt-host" placeholder="192.168.1.x">
+  </div>
+  <div class="row">
+    <label>Port</label>
+    <input type="number" id="mqtt-port" value="1883">
+  </div>
+  <div class="row">
+    <button class="btn primary" onclick="saveMqtt()">Save</button>
+    <span class="status" id="mqtt-save-status"></span>
+  </div>
+</div>
+
+<!-- Identity -->
+<div class="card">
+  <div class="card-label">Identity</div>
+  <div class="status" id="identity-info"></div>
+  <div class="row" style="margin-top: 10px">
+    <button class="btn danger" onclick="resetIdentity()">Reset Identity</button>
+    <span class="status" id="identity-reset-status"></span>
+  </div>
+</div>
+
+<!-- Adapters -->
+<div class="card">
+  <div class="card-label">BLE Adapters</div>
+  <div id="adapter-list" class="status">Loading...</div>
+</div>
+
+<div id="log"></div>
+
+<script>
+var _selectedAddr = null;
+
+function api(method, path, body) {
+  var opts = { method: method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  return fetch(path, opts).then(function(r) { return r.json(); });
+}
+
+function logMsg(msg) {
+  var el = document.getElementById('log');
+  el.style.display = 'block';
+  el.textContent += new Date().toLocaleTimeString() + ' ' + msg + '\\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+// -- Status --
+function loadStatus() {
+  api('GET', '/api/health').then(function(d) {
+    var el = document.getElementById('ble-status');
+    if (d.connected) { el.textContent = 'Connected (' + d.assigned_addr + ')'; el.className = 'status ok'; }
+    else { el.textContent = 'Disconnected'; el.className = 'status err'; }
+  }).catch(function() {
+    document.getElementById('ble-status').textContent = 'API unreachable';
+    document.getElementById('ble-status').className = 'status err';
+  });
+
+  api('GET', '/api/setup/config').then(function(d) {
+    document.getElementById('mqtt-host').value = d.mqtt_host || '';
+    document.getElementById('mqtt-port').value = d.mqtt_port || 1883;
+    var mel = document.getElementById('mqtt-status');
+    if (d.mqtt_enabled && d.mqtt_host) { mel.textContent = d.mqtt_host + ':' + d.mqtt_port; mel.className = 'status ok'; }
+    else { mel.textContent = 'Not configured'; mel.className = 'status info'; }
+  });
+
+  api('GET', '/api/setup/identity').then(function(d) {
+    var el = document.getElementById('identity-status');
+    var info = document.getElementById('identity-info');
+    if (d.exists) {
+      el.textContent = d.username + ' (' + d.muid + ')'; el.className = 'status ok';
+      info.textContent = 'User: ' + d.username + '\\nMUID: ' + d.muid + '\\nFile: ' + d.file;
+    } else {
+      el.textContent = 'None (will be created on connect)'; el.className = 'status info';
+      info.textContent = 'No identity file. One will be created automatically on first connection.';
+    }
+  });
+
+  api('GET', '/api/setup/adapters').then(function(d) {
+    var el = document.getElementById('adapter-list');
+    if (!d.length) { el.textContent = 'No BLE adapters found'; el.className = 'status err'; return; }
+    el.innerHTML = '';
+    d.forEach(function(a) {
+      var powered = a.powered ? '<span style="color:#3dba6f">ON</span>' : '<span style="color:#e05050">OFF</span>';
+      el.innerHTML += '<div style="margin-bottom:6px">' + a.path + ' &mdash; ' + a.address + ' ' + powered + '</div>';
+    });
+  });
+}
+
+// -- Scan --
+function bleScan() {
+  document.getElementById('btn-scan').disabled = true;
+  document.getElementById('scan-spinner').style.display = 'inline';
+  document.getElementById('device-list').innerHTML = '';
+  document.getElementById('pair-row').style.display = 'none';
+  _selectedAddr = null;
+  logMsg('Scanning for Truma devices (10s)...');
+
+  api('POST', '/api/setup/scan').then(function(d) {
+    document.getElementById('btn-scan').disabled = false;
+    document.getElementById('scan-spinner').style.display = 'none';
+    var list = document.getElementById('device-list');
+    if (!d.devices || !d.devices.length) {
+      list.innerHTML = '<li>No Truma devices found. Make sure the panel is powered on.</li>';
+      logMsg('No devices found');
+      return;
+    }
+    logMsg('Found ' + d.devices.length + ' device(s)');
+    list.innerHTML = '';
+    d.devices.forEach(function(dev) {
+      var badges = '';
+      if (dev.paired) badges += '<span class="badge paired">Paired</span>';
+      if (dev.connected) badges += '<span class="badge connected">Connected</span>';
+      var li = document.createElement('li');
+      li.style.cursor = 'pointer';
+      li.innerHTML = '<div><span class="device-name">' + dev.name + '</span>' + badges +
+        '<br><span class="device-addr">' + dev.address + ' (RSSI: ' + dev.rssi + ')</span></div>';
+      if (!dev.paired) {
+        li.onclick = function() { selectDevice(dev.address, dev.name); };
+      }
+      list.appendChild(li);
+    });
+  }).catch(function(e) {
+    document.getElementById('btn-scan').disabled = false;
+    document.getElementById('scan-spinner').style.display = 'none';
+    logMsg('Scan error: ' + e.message);
+  });
+}
+
+function selectDevice(addr, name) {
+  _selectedAddr = addr;
+  document.getElementById('pair-row').style.display = 'flex';
+  document.getElementById('pair-status').textContent = 'Selected: ' + name + ' (' + addr + ')';
+  document.getElementById('pair-status').className = 'status info';
+  logMsg('Selected ' + name + ' for pairing');
+}
+
+// -- Pair --
+function blePair() {
+  if (!_selectedAddr) return;
+  var passkey = parseInt(document.getElementById('passkey').value);
+  if (!passkey || passkey < 0 || passkey > 999999) {
+    document.getElementById('pair-status').textContent = 'Enter a valid 6-digit passkey';
+    document.getElementById('pair-status').className = 'status err';
+    return;
+  }
+  document.getElementById('pair-status').textContent = 'Pairing...';
+  document.getElementById('pair-status').className = 'status info';
+  logMsg('Pairing with ' + _selectedAddr + ' using passkey ' + passkey);
+
+  api('POST', '/api/setup/pair', { address: _selectedAddr, passkey: passkey }).then(function(d) {
+    if (d.ok) {
+      document.getElementById('pair-status').textContent = d.message;
+      document.getElementById('pair-status').className = 'status ok';
+      logMsg('Pairing: ' + d.message);
+    } else {
+      document.getElementById('pair-status').textContent = d.message;
+      document.getElementById('pair-status').className = 'status err';
+      logMsg('Pairing failed: ' + d.message);
+    }
+    loadStatus();
+  }).catch(function(e) {
+    document.getElementById('pair-status').textContent = 'Error: ' + e.message;
+    document.getElementById('pair-status').className = 'status err';
+  });
+}
+
+// -- MQTT --
+function saveMqtt() {
+  var host = document.getElementById('mqtt-host').value.trim();
+  var port = parseInt(document.getElementById('mqtt-port').value) || 1883;
+  api('POST', '/api/setup/config', { mqtt_host: host, mqtt_port: port, mqtt_enabled: !!host }).then(function(d) {
+    document.getElementById('mqtt-save-status').textContent = 'Saved. Restart service to apply.';
+    document.getElementById('mqtt-save-status').className = 'status ok';
+    logMsg('MQTT config saved: ' + host + ':' + port);
+    loadStatus();
+  }).catch(function(e) {
+    document.getElementById('mqtt-save-status').textContent = 'Error: ' + e.message;
+    document.getElementById('mqtt-save-status').className = 'status err';
+  });
+}
+
+// -- Identity --
+function resetIdentity() {
+  if (!confirm('Reset identity? You will need to re-pair with the Truma panel.')) return;
+  api('POST', '/api/setup/reset-identity').then(function(d) {
+    document.getElementById('identity-reset-status').textContent = d.message;
+    document.getElementById('identity-reset-status').className = d.ok ? 'status ok' : 'status err';
+    logMsg('Identity: ' + d.message);
+    loadStatus();
+  });
+}
+
+loadStatus();
+</script>
+</body>
+</html>"""
+
+
 class TrumaRequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler for Truma REST API."""
 
@@ -678,10 +985,13 @@ class TrumaRequestHandler(BaseHTTPRequestHandler):
     state_getter = None      # callable() -> dict (from TrumaState.get_status)
     command_sender = None    # callable(topic, param, value) -> (bool, str)
     health_getter = None     # callable() -> dict
+    setup_handler = None     # callable(method, path, data) -> dict
 
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self._html_response(WEB_PAGE)
+        elif self.path == "/setup":
+            self._html_response(SETUP_PAGE)
         elif self.path == "/api/status":
             self._json_response(self.state_getter())
         elif self.path.startswith("/api/status/"):
@@ -693,6 +1003,8 @@ class TrumaRequestHandler(BaseHTTPRequestHandler):
                 self._json_response({"error": f"unknown section: {section}"}, 404)
         elif self.path == "/api/health":
             self._json_response(self.health_getter())
+        elif self.path.startswith("/api/setup/"):
+            self._handle_setup("GET", None)
         else:
             self._json_response({"error": "not found"}, 404)
 
@@ -728,8 +1040,29 @@ class TrumaRequestHandler(BaseHTTPRequestHandler):
                 self._json_response({"error": "invalid JSON"}, 400)
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
+        elif self.path.startswith("/api/setup/"):
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+                data = json.loads(body)
+                self._handle_setup("POST", data)
+            except json.JSONDecodeError:
+                self._json_response({"error": "invalid JSON"}, 400)
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
         else:
             self._json_response({"error": "not found"}, 404)
+
+    def _handle_setup(self, method, data):
+        """Route setup API requests."""
+        if not self.setup_handler:
+            self._json_response({"error": "setup not available"}, 503)
+            return
+        try:
+            result = self.setup_handler(method, self.path, data)
+            self._json_response(result)
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
 
     def _json_response(self, data: Any, status: int = 200):
         self.send_response(status)
@@ -752,7 +1085,7 @@ class TrumaRequestHandler(BaseHTTPRequestHandler):
 class TrumaRestApi:
     """REST API server running in a background thread."""
 
-    def __init__(self, state_getter, command_sender, health_getter, port=8090):
+    def __init__(self, state_getter, command_sender, health_getter, port=8090, setup_handler=None):
         self.port = port
         self._server = None
         self._thread = None
@@ -762,9 +1095,11 @@ class TrumaRestApi:
         TrumaRequestHandler.state_getter = state_getter
         TrumaRequestHandler.command_sender = command_sender
         TrumaRequestHandler.health_getter = health_getter
+        TrumaRequestHandler.setup_handler = setup_handler
 
     def start(self):
         """Start the REST API server in a background thread."""
+        HTTPServer.allow_reuse_address = True
         self._server = HTTPServer(("0.0.0.0", self.port), TrumaRequestHandler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()

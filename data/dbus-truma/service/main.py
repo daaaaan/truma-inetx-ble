@@ -17,6 +17,8 @@ from .protocol import (
 from .ble_transport import BleTransport
 from .truma_state import TrumaState
 from .rest_api import TrumaRestApi
+from .pairing import BlePairing
+from . import config
 
 # Try to import D-Bus service (only works on Venus OS)
 try:
@@ -45,6 +47,8 @@ class TrumaService:
         self._running = False
         self._reconnect_delay = 5  # seconds, increases on failure
         self._loop = None  # set in start()
+        self._config = config.load()
+        self._pairing = BlePairing(self._config.get("ble_adapter", "/org/bluez/hci1"))
 
     async def start(self):
         """Start the service."""
@@ -68,18 +72,22 @@ class TrumaService:
             state_getter=self.state.get_status,
             command_sender=self._handle_command,
             health_getter=self._get_health,
-            port=8090
+            port=8090,
+            setup_handler=self._handle_setup,
         )
         self.rest_api.start()
 
-        # Start MQTT with HA auto-discovery
-        if HAS_MQTT:
+        # Start MQTT with HA auto-discovery (if configured)
+        if HAS_MQTT and self._config.get("mqtt_enabled") and self._config.get("mqtt_host"):
             self.mqtt = TrumaMqtt(
                 state_getter=self.state.get_status,
                 command_sender=self._handle_command,
+                host=self._config["mqtt_host"],
+                port=self._config.get("mqtt_port", 1883),
             )
             self.mqtt.start()
-            logger.info("MQTT HA discovery started")
+            logger.info("MQTT HA discovery started (%s:%d)",
+                        self._config["mqtt_host"], self._config.get("mqtt_port", 1883))
 
         # Start D-Bus service (if available)
         if HAS_DBUS:
@@ -257,6 +265,48 @@ class TrumaService:
             "assigned_addr": f"0x{self.state.assigned_addr:04X}",
             "raw_param_count": len(self.state.raw_params),
         }
+
+    def _handle_setup(self, method: str, path: str, data: dict) -> dict:
+        """Handle setup API requests (called from HTTP thread)."""
+        action = path.replace("/api/setup/", "")
+
+        if method == "GET":
+            if action == "adapters":
+                return self._run_async(self._pairing.get_adapters())
+            elif action == "identity":
+                return BlePairing.get_identity()
+            elif action == "config":
+                return self._config
+            else:
+                return {"error": "unknown endpoint"}
+
+        elif method == "POST":
+            if action == "scan":
+                devices = self._run_async(self._pairing.scan())
+                return {"devices": devices}
+            elif action == "pair":
+                address = data.get("address", "")
+                passkey = int(data.get("passkey", 0))
+                return self._run_async(self._pairing.pair(address, passkey))
+            elif action == "unpair":
+                address = data.get("address", "")
+                return self._run_async(self._pairing.unpair(address))
+            elif action == "reset-identity":
+                return BlePairing.reset_identity()
+            elif action == "config":
+                self._config = config.update(data)
+                return self._config
+            else:
+                return {"error": "unknown endpoint"}
+
+        return {"error": "method not allowed"}
+
+    def _run_async(self, coro):
+        """Run an async coroutine from a sync context (HTTP thread)."""
+        if self._loop and self._loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+            return future.result(timeout=30)
+        return {"error": "event loop not running"}
 
     async def stop(self):
         """Clean shutdown."""

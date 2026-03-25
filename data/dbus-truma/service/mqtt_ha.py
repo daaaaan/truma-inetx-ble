@@ -13,8 +13,8 @@ except ImportError:
 
 log = logging.getLogger("truma.mqtt")
 
-MQTT_HOST = "192.168.1.55"
-MQTT_PORT = 1883
+DEFAULT_MQTT_HOST = "192.168.1.55"
+DEFAULT_MQTT_PORT = 1883
 DEVICE_INFO = {
     "identifiers": ["truma_heater"],
     "name": "Truma Combi D 4 E",
@@ -25,14 +25,18 @@ DEVICE_INFO = {
 
 
 class TrumaMqtt:
-    def __init__(self, state_getter, command_sender):
+    def __init__(self, state_getter, command_sender, host=None, port=None):
         """
         Args:
             state_getter: callable() -> dict (from TrumaState.get_status)
             command_sender: callable(topic, param, value) -> (bool, str)
+            host: MQTT broker hostname/IP
+            port: MQTT broker port
         """
         self._state_getter = state_getter
         self._command_sender = command_sender
+        self._host = host or DEFAULT_MQTT_HOST
+        self._port = port or DEFAULT_MQTT_PORT
         self._client = None
         self._thread = None
         self._running = False
@@ -50,7 +54,7 @@ class TrumaMqtt:
         self._client.on_message = self._on_message
         self._client.will_set("truma/status", "offline", retain=True)
         try:
-            self._client.connect(MQTT_HOST, MQTT_PORT, 60)
+            self._client.connect(self._host, self._port, 60)
         except Exception as e:
             log.error("MQTT connect failed: %s", e)
             return
