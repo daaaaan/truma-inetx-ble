@@ -753,10 +753,6 @@ SETUP_PAGE = """<!DOCTYPE html>
     <label>MQTT</label>
     <span class="status" id="mqtt-status">Checking...</span>
   </div>
-  <div class="row">
-    <label>Identity</label>
-    <span class="status" id="identity-status">Checking...</span>
-  </div>
 </div>
 
 <!-- Service Stats -->
@@ -879,14 +875,11 @@ function loadStatus() {
   });
 
   api('GET', '/api/setup/identity').then(function(d) {
-    var el = document.getElementById('identity-status');
     var info = document.getElementById('identity-info');
     if (d.exists) {
-      el.textContent = d.username + ' (' + d.muid + ')'; el.className = 'status ok';
-      info.textContent = 'User: ' + d.username + '\\nMUID: ' + d.muid + '\\nFile: ' + d.file;
+      info.textContent = 'MUID: ' + d.muid;
     } else {
-      el.textContent = 'None (will be created on connect)'; el.className = 'status info';
-      info.textContent = 'No identity file. One will be created automatically on first connection.';
+      info.textContent = 'No identity file. One will be created on first connection.';
     }
   });
 
