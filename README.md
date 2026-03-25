@@ -232,10 +232,6 @@ See [`docs/truma-inetx-protocol-reference.md`](docs/truma-inetx-protocol-referen
 - Device address assignments
 - CBOR payload formats
 
-## Known Issues
-
-- **Water heating cannot be turned on remotely** — sending water heating commands via BLE returns an error. Room heating, temperature, diesel, electric, and fan commands all work. Investigation needed into the correct command sequence or parameter values for water heating.
-
 ## License
 
 This project is not affiliated with Truma or Victron. Use at your own risk.
