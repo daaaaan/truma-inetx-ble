@@ -25,16 +25,18 @@ DEVICE_INFO = {
 
 
 class TrumaMqtt:
-    def __init__(self, state_getter, command_sender, host=None, port=None):
+    def __init__(self, state_getter, command_sender, host=None, port=None, sequence_sender=None):
         """
         Args:
             state_getter: callable() -> dict (from TrumaState.get_status)
             command_sender: callable(topic, param, value) -> (bool, str)
             host: MQTT broker hostname/IP
             port: MQTT broker port
+            sequence_sender: callable([(topic, param, value), ...], delay) for multi-command
         """
         self._state_getter = state_getter
         self._command_sender = command_sender
+        self._sequence_sender = sequence_sender
         self._host = host or DEFAULT_MQTT_HOST
         self._port = port or DEFAULT_MQTT_PORT
         self._client = None
@@ -103,10 +105,16 @@ class TrumaMqtt:
                 if value == -1:
                     self._command_sender("WaterHeating", "Active", 0)
                 else:
-                    # Activate first, then set mode — Truma rejects mode
-                    # changes when water heating is inactive
-                    self._command_sender("WaterHeating", "Active", 1)
-                    self._command_sender("WaterHeating", "Mode", value)
+                    # Activate first, then set mode with delay — Truma
+                    # needs time to process Active before accepting Mode
+                    if self._sequence_sender:
+                        self._sequence_sender([
+                            ("WaterHeating", "Active", 1),
+                            ("WaterHeating", "Mode", value),
+                        ], delay=1.0)
+                    else:
+                        self._command_sender("WaterHeating", "Active", 1)
+                        self._command_sender("WaterHeating", "Mode", value)
             elif topic == "truma/water/active/set":
                 self._command_sender("WaterHeating", "Active", int(payload))
             elif topic == "truma/energy/diesel/set":

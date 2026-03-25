@@ -84,6 +84,7 @@ class TrumaService:
                 command_sender=self._handle_command,
                 host=self._config["mqtt_host"],
                 port=self._config.get("mqtt_port", 1883),
+                sequence_sender=self._send_command_sequence,
             )
             self.mqtt.start()
             logger.info("MQTT HA discovery started (%s:%d)",
@@ -246,9 +247,28 @@ class TrumaService:
         frame = build_write_frame(self.transport.assigned_addr, dest, topic, param, value)
         if self._loop:
             self._loop.call_soon_threadsafe(
-                lambda: self._loop.create_task(self.transport.send(frame))
+                lambda f=frame: self._loop.create_task(self.transport.send(f))
             )
         return True, f"sent {topic}.{param}={value}"
+
+    def _send_command_sequence(self, commands, delay=1.0):
+        """Send multiple commands with delay between them (thread-safe).
+
+        Args:
+            commands: list of (topic, param, value) tuples
+            delay: seconds between commands
+        """
+        async def _sequence():
+            for topic, param, value in commands:
+                dest = self.state.get_command_dest(topic)
+                frame = build_write_frame(self.transport.assigned_addr, dest, topic, param, value)
+                await self.transport.send(frame)
+                await asyncio.sleep(delay)
+
+        if self._loop:
+            self._loop.call_soon_threadsafe(
+                lambda: self._loop.create_task(_sequence())
+            )
 
     def _handle_command_async(self, topic: str, param: str, value: int):
         """Handle command from D-Bus (fire and forget)."""
