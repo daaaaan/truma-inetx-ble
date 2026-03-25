@@ -855,7 +855,7 @@ function fmtTime(ts) {
 function loadStatus() {
   api('GET', '/api/health').then(function(d) {
     var el = document.getElementById('ble-status');
-    if (d.connected) { el.textContent = 'Connected (' + d.assigned_addr + ')'; el.className = 'status ok'; }
+    if (d.connected) { el.textContent = 'Connected'; el.className = 'status ok'; }
     else { el.textContent = 'Disconnected'; el.className = 'status err'; }
     document.getElementById('stat-uptime').textContent = fmtUptime(d.uptime);
     document.getElementById('stat-params').textContent = d.raw_param_count || 0;
@@ -870,7 +870,7 @@ function loadStatus() {
     document.getElementById('mqtt-host').value = d.mqtt_host || '';
     document.getElementById('mqtt-port').value = d.mqtt_port || 1883;
     var mel = document.getElementById('mqtt-status');
-    if (d.mqtt_enabled && d.mqtt_host) { mel.textContent = d.mqtt_host + ':' + d.mqtt_port; mel.className = 'status ok'; }
+    if (d.mqtt_enabled && d.mqtt_host) { mel.textContent = 'Connected (' + d.mqtt_host + ':' + d.mqtt_port + ')'; mel.className = 'status ok'; }
     else { mel.textContent = 'Not configured'; mel.className = 'status info'; }
   });
 
