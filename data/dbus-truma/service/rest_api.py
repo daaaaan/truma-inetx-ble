@@ -803,12 +803,12 @@ SETUP_PAGE = """<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Identity -->
+<!-- Pairing Management -->
 <div class="card">
-  <div class="card-label">Identity</div>
+  <div class="card-label">Pairing</div>
   <div class="status" id="identity-info"></div>
   <div class="row" style="margin-top: 10px">
-    <button class="btn danger" onclick="resetIdentity()">Reset Identity</button>
+    <button class="btn danger" onclick="unpairDevice()">Unpair</button>
     <span class="status" id="identity-reset-status"></span>
   </div>
 </div>
@@ -987,13 +987,13 @@ function saveMqtt() {
   });
 }
 
-// -- Identity --
-function resetIdentity() {
-  if (!confirm('Reset identity? You will need to re-pair with the Truma panel.')) return;
+// -- Unpair --
+function unpairDevice() {
+  if (!confirm('Unpair from Truma? You will need to re-pair with the passkey from the panel.')) return;
   api('POST', '/api/setup/reset-identity').then(function(d) {
     document.getElementById('identity-reset-status').textContent = d.message;
     document.getElementById('identity-reset-status').className = d.ok ? 'status ok' : 'status err';
-    logMsg('Identity: ' + d.message);
+    logMsg('Unpair: ' + d.message);
     loadStatus();
   });
 }
